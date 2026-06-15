@@ -702,12 +702,40 @@ export async function deleteToTarget(targetFreeMb: number) {
   );
 }
 
-export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
+export interface SystemLogPage {
+  items: SystemLog[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+}
+
+export async function fetchSystemLogs(filters: {
+  type?: string;
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  page_size?: number;
+  key_name?: string;
+  account_email?: string;
+  status?: string;
+  summary?: string;
+}) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+  if (filters.page && filters.page > 1) params.set("page", String(filters.page));
+  if (filters.page_size && filters.page_size !== 20) params.set("page_size", String(filters.page_size));
+  if (filters.key_name) params.set("key_name", filters.key_name);
+  if (filters.account_email) params.set("account_email", filters.account_email);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.summary) params.set("summary", filters.summary);
+  return httpRequest<SystemLogPage>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
+}
+
+export async function fetchSystemLogDetail(logId: string) {
+  return httpRequest<SystemLog>(`/api/logs/${encodeURIComponent(logId)}`);
 }
 
 export async function deleteSystemLogs(ids: string[]) {

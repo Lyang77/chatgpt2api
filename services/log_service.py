@@ -49,7 +49,17 @@ class LogService:
         return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
-    def _matches_filters(item: dict[str, Any], *, type: str = "", start_date: str = "", end_date: str = "") -> bool:
+    def _matches_filters(
+        item: dict[str, Any],
+        *,
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        key_name: str = "",
+        account_email: str = "",
+        status: str = "",
+        summary: str = "",
+    ) -> bool:
         t = str(item.get("time") or "")
         day = t[:10]
         if type and item.get("type") != type:
@@ -57,6 +67,15 @@ class LogService:
         if start_date and day < start_date:
             return False
         if end_date and day > end_date:
+            return False
+        detail = item.get("detail") or {}
+        if key_name and key_name.lower() not in str(detail.get("key_name") or "").lower():
+            return False
+        if account_email and account_email.lower() not in str(detail.get("account_email") or "").lower():
+            return False
+        if status and str(detail.get("status") or "") != status:
+            return False
+        if summary and summary.lower() not in str(item.get("summary") or "").lower():
             return False
         return True
 
@@ -71,21 +90,66 @@ class LogService:
         with self.path.open("a", encoding="utf-8") as file:
             file.write(self._serialize_item(item) + "\n")
 
-    def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
+    def list(
+        self,
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        page: int = 1,
+        page_size: int = 20,
+        key_name: str = "",
+        account_email: str = "",
+        status: str = "",
+        summary: str = "",
+    ) -> dict[str, Any]:
+        """分页查询日志，倒序（最新在前）。一次遍历同时计算 total 和当前页数据。
+        列表接口不返回 detail.request_text，减少传输量。"""
         if not self.path.exists():
-            return []
+            return {"items": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        total = 0
         items: list[dict[str, Any]] = []
+        start_index = (page - 1) * page_size
+        end_index = start_index + page_size
+        for line_number in range(len(lines) - 1, -1, -1):
+            item = self._parse_line(lines[line_number], line_number)
+            if item is None:
+                continue
+            if not self._matches_filters(
+                item,
+                type=type,
+                start_date=start_date,
+                end_date=end_date,
+                key_name=key_name,
+                account_email=account_email,
+                status=status,
+                summary=summary,
+            ):
+                continue
+            if start_index <= total < end_index:
+                # 列表接口剥离 request_text，减少传输量
+                detail = item.get("detail")
+                if isinstance(detail, dict) and "request_text" in detail:
+                    detail = {k: v for k, v in detail.items() if k != "request_text"}
+                    item = {**item, "detail": detail}
+                items.append(item)
+            total += 1
+        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
+        return {"items": items, "total": total, "page": page, "page_size": page_size, "total_pages": total_pages}
+
+    def get_by_id(self, log_id: str) -> dict[str, Any] | None:
+        """根据 ID 查询单条日志完整数据（含 request_text）。"""
+        target_id = str(log_id or "").strip()
+        if not target_id or not self.path.exists():
+            return None
         lines = self.path.read_text(encoding="utf-8").splitlines()
         for line_number in range(len(lines) - 1, -1, -1):
             item = self._parse_line(lines[line_number], line_number)
             if item is None:
                 continue
-            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
-                continue
-            items.append(item)
-            if len(items) >= limit:
-                break
-        return items
+            if item.get("id") == target_id:
+                return item
+        return None
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
@@ -169,14 +233,11 @@ def _strip_internal_response_fields(value: object) -> object:
     return value
 
 
-def _request_excerpt(text: object, limit: int = 1000) -> str:
+def _request_excerpt(text: object) -> str:
     value = str(text or "").strip()
     if not value:
         return ""
-    normalized = " ".join(value.split())
-    if len(normalized) <= limit:
-        return normalized
-    return normalized[: limit - 1].rstrip() + "…"
+    return " ".join(value.split())
 
 
 def _image_error_response(exc: Exception) -> JSONResponse:

@@ -128,9 +128,42 @@ def create_router(app_version: str) -> APIRouter:
         return get_image_download_response(image_path)
 
     @router.get("/api/logs")
-    async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
+    async def get_logs(
+        type: str = "",
+        start_date: str = "",
+        end_date: str = "",
+        page: int = 1,
+        page_size: int = 20,
+        key_name: str = "",
+        account_email: str = "",
+        status: str = "",
+        summary: str = "",
+        authorization: str | None = Header(default=None),
+    ):
         require_admin(authorization)
-        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
+        if page < 1:
+            page = 1
+        if page_size < 1 or page_size > 200:
+            page_size = 20
+        return log_service.list(
+            type=type.strip(),
+            start_date=start_date.strip(),
+            end_date=end_date.strip(),
+            page=page,
+            page_size=page_size,
+            key_name=key_name.strip(),
+            account_email=account_email.strip(),
+            status=status.strip(),
+            summary=summary.strip(),
+        )
+
+    @router.get("/api/logs/{log_id}")
+    async def get_log_detail(log_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        item = log_service.get_by_id(log_id.strip())
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "log not found"})
+        return item
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
