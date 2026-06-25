@@ -10,6 +10,7 @@ from services.protocol.chat_completion_cache import cache_key, chat_completion_c
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
+    backend_account_email,
     count_message_image_tokens,
     count_message_text_tokens,
     count_text_tokens,
@@ -43,6 +44,39 @@ TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
 )
 
 RESPONSE_CONTENT_PART_TYPES = {"text", "input_text", "output_text", "image_url", "input_image", "image"}
+
+
+def _with_internal_account_email(event: dict[str, Any], backend: object) -> dict[str, Any]:
+    email = backend_account_email(backend)
+    if not email:
+        return event
+    event = {**event, "_account_email": email}
+    response = event.get("response")
+    if isinstance(response, dict):
+        event["response"] = {**response, "_account_email": email}
+    return event
+
+
+def normalize_thinking_effort(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "none"}:
+        return ""
+    if normalized in {"low", "medium", "high"}:
+        return normalized
+    if normalized in {"xhigh", "extended"}:
+        return "extended"
+    return ""
+
+
+def thinking_effort_from_body(body: dict[str, Any]) -> str:
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        return normalize_thinking_effort(reasoning.get("effort"))
+    if "thinking_effort" in body:
+        return normalize_thinking_effort(body.get("thinking_effort"))
+    if "reasoning_effort" in body:
+        return normalize_thinking_effort(body.get("reasoning_effort"))
+    return ""
 
 
 def is_text_response_request(body: dict[str, Any]) -> bool:
@@ -277,25 +311,32 @@ def text_response_parts(body: dict[str, Any]) -> tuple[str, list[dict[str, Any]]
 def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
     model = str(body.get("model") or "auto").strip() or "auto"
     messages = messages if messages is not None else messages_from_input(body.get("input"), body.get("instructions"))
+    thinking_effort = thinking_effort_from_body(body)
     response_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
     full_text = ""
     yield response_created(response_id, model, created)
     yield {"type": "response.output_item.added", "output_index": 0, "item": text_output_item("", item_id, "in_progress")}
-    request = ConversationRequest(model=model, messages=messages)
+    request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
     for delta in stream_text_deltas(backend, request):
         full_text += delta
-        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
-    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text}
+        yield _with_internal_account_email(
+            {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta},
+            backend,
+        )
+    yield _with_internal_account_email(
+        {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text},
+        backend,
+    )
     item = text_output_item(full_text, item_id, "completed")
-    yield {"type": "response.output_item.done", "output_index": 0, "item": item}
+    yield _with_internal_account_email({"type": "response.output_item.done", "output_index": 0, "item": item}, backend)
     usage = token_usage(
         input_text_tokens=count_message_text_tokens(messages, model),
         input_image_tokens=count_message_image_tokens(messages, model),
         output_text_tokens=count_text_tokens(full_text, model),
     )
-    yield response_completed(response_id, model, created, [item], usage)
+    yield _with_internal_account_email(response_completed(response_id, model, created, [item], usage), backend)
 
 
 def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
@@ -379,11 +420,15 @@ def stream_image_response(
 
 def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     completed = {}
+    cache_hit = False
     for event in events:
+        cache_hit = cache_hit or event.get("_cache_hit") is True
         if event.get("type") == "response.completed":
             completed = event.get("response") if isinstance(event.get("response"), dict) else {}
     if not completed:
         raise RuntimeError("response generation failed")
+    if cache_hit:
+        completed = {**completed, "_cache_hit": True}
     return completed
 
 

@@ -153,11 +153,13 @@ class ImageTaskService:
         base_url: str = "",
         images: list[tuple[bytes, str, str]] | None = None,
         masks: list[tuple[bytes, str, str]] | None = None,
+        request_urls: list[str] | None = None,
     ) -> dict[str, Any]:
         payload = {
             "prompt": prompt,
             "images": images or [],
             "mask": masks or [],
+            "request_urls": request_urls or [],
             "model": model,
             "n": 1,
             "size": size,
@@ -283,6 +285,7 @@ class ImageTaskService:
                 started,
                 "调用完成",
                 request_preview=request_text(payload.get("prompt")),
+                request_urls=payload.get("request_urls") if isinstance(payload.get("request_urls"), list) else [],
                 urls=_collect_image_urls(data),
                 account_email=account_email,
             )
@@ -301,6 +304,7 @@ class ImageTaskService:
                 started,
                 "调用失败",
                 request_preview=request_text(payload.get("prompt")),
+                request_urls=payload.get("request_urls") if isinstance(payload.get("request_urls"), list) else [],
                 status="failed",
                 error=error_message,
                 account_email=account_email,
@@ -318,6 +322,7 @@ class ImageTaskService:
         status: str = "success",
         error: str = "",
         urls: list[str] | None = None,
+        request_urls: list[str] | None = None,
         account_email: str = "",
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
@@ -339,6 +344,8 @@ class ImageTaskService:
             detail["error"] = error
         if account_email:
             detail["account_email"] = account_email
+        if request_urls:
+            detail["request_urls"] = list(dict.fromkeys(str(url) for url in request_urls if str(url or "").strip()))
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
         try:

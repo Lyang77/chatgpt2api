@@ -4,11 +4,12 @@ import unittest
 from unittest import mock
 import json
 import base64
+from types import SimpleNamespace
 
 from services.config import config
 from services.protocol import openai_v1_chat_complete, openai_v1_response
-from services.protocol.chat_completion_cache import chat_completion_cache
-from services.protocol.conversation import iter_conversation_payloads, sanitize_output_text
+from services.protocol.chat_completion_cache import cache_key, chat_completion_cache
+from services.protocol.conversation import ConversationRequest, iter_conversation_payloads, sanitize_output_text, stream_text_deltas
 from utils.helper import extract_image_from_message_content
 
 
@@ -16,6 +17,14 @@ PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR4nGP8z8BQDwAFgwJ/luzl4wAAAABJRU5ErkJggg=="
 )
 PNG_1X1_DATA_URL = "data:image/png;base64," + base64.b64encode(PNG_1X1).decode("ascii")
+
+
+def without_cache_marker(value):
+    if isinstance(value, dict):
+        return {key: without_cache_marker(item) for key, item in value.items() if key != "_cache_hit"}
+    if isinstance(value, list):
+        return [without_cache_marker(item) for item in value]
+    return value
 
 
 class ChatCompletionCacheTests(unittest.TestCase):
@@ -65,6 +74,62 @@ class ChatCompletionCacheTests(unittest.TestCase):
             first["choices"][0]["message"]["content"],
             second["choices"][0]["message"]["content"],
         )
+        self.assertNotIn("_cache_hit", first)
+        self.assertIs(second.get("_cache_hit"), True)
+
+    def test_cache_key_distinguishes_thinking_effort_inputs(self) -> None:
+        messages = [{"role": "user", "content": "same prompt"}]
+        base = {"model": "auto", "messages": messages}
+
+        default_key = cache_key(base, messages, stream=False)
+        thinking_key = cache_key({**base, "thinking_effort": "high"}, messages, stream=False)
+        reasoning_key = cache_key({**base, "reasoning": {"effort": "high"}}, messages, stream=False)
+
+        self.assertNotEqual(default_key, thinking_key)
+        self.assertNotEqual(default_key, reasoning_key)
+        self.assertNotEqual(thinking_key, reasoning_key)
+
+    def test_chat_completion_reasoning_effort_reaches_conversation_request(self) -> None:
+        captured_efforts: list[str] = []
+
+        def fake_collect_text(_backend, request):
+            captured_efforts.append(request.thinking_effort)
+            return "ok"
+
+        body = {
+            "model": "auto",
+            "reasoning_effort": "xhigh",
+            "messages": [{"role": "user", "content": "use more reasoning"}],
+        }
+
+        with (
+            mock.patch("services.protocol.openai_v1_chat_complete.text_backend", return_value=object()),
+            mock.patch("services.protocol.openai_v1_chat_complete.collect_text", side_effect=fake_collect_text),
+        ):
+            openai_v1_chat_complete.handle(body)
+
+        self.assertEqual(captured_efforts, ["extended"])
+
+    def test_responses_reasoning_effort_reaches_conversation_request(self) -> None:
+        captured_efforts: list[str] = []
+
+        def fake_stream_text_deltas(_backend, request):
+            captured_efforts.append(request.thinking_effort)
+            yield "ok"
+
+        body = {
+            "model": "auto",
+            "input": "use more reasoning",
+            "reasoning": {"effort": "xhigh"},
+        }
+
+        with (
+            mock.patch("services.protocol.openai_v1_response.text_backend", return_value=object()),
+            mock.patch("services.protocol.openai_v1_response.stream_text_deltas", side_effect=fake_stream_text_deltas),
+        ):
+            openai_v1_response.handle(body)
+
+        self.assertEqual(captured_efforts, ["extended"])
 
     def test_repeated_stream_text_completion_replays_cached_chunks(self) -> None:
         calls = 0
@@ -92,9 +157,11 @@ class ChatCompletionCacheTests(unittest.TestCase):
             second = list(openai_v1_chat_complete.handle(body))
 
         self.assertEqual(calls, 1)
-        self.assertEqual(first, second)
+        self.assertEqual(first, without_cache_marker(second))
         content = "".join(str(chunk["choices"][0]["delta"].get("content") or "") for chunk in second)
         self.assertEqual(content, "streamed answer")
+        self.assertFalse(any(chunk.get("_cache_hit") for chunk in first))
+        self.assertTrue(any(chunk.get("_cache_hit") for chunk in second))
 
     def test_adjacent_duplicate_messages_are_removed_before_upstream_call(self) -> None:
         captured_messages = []
@@ -143,6 +210,43 @@ class ChatCompletionCacheTests(unittest.TestCase):
         output_details = response["usage"]["completion_tokens_details"]
         self.assertEqual(output_details["reasoning_tokens"], 0)
 
+    def test_non_stream_text_completion_preserves_internal_account_email_for_logs(self) -> None:
+        backend = SimpleNamespace()
+
+        def fake_collect_text(active_backend, _request):
+            active_backend._account_email = "text-account@example.test"
+            return "ok"
+
+        with (
+            mock.patch("services.protocol.openai_v1_chat_complete.text_backend", return_value=backend),
+            mock.patch("services.protocol.openai_v1_chat_complete.collect_text", side_effect=fake_collect_text),
+        ):
+            response = openai_v1_chat_complete.handle({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "who executed this"}],
+            })
+
+        self.assertEqual(response.get("_account_email"), "text-account@example.test")
+
+    def test_stream_text_completion_preserves_internal_account_email_for_logs(self) -> None:
+        backend = SimpleNamespace()
+
+        def fake_stream_text_deltas(active_backend, _request):
+            active_backend._account_email = "stream-account@example.test"
+            yield "ok"
+
+        with (
+            mock.patch("services.protocol.openai_v1_chat_complete.text_backend", return_value=backend),
+            mock.patch("services.protocol.openai_v1_chat_complete.stream_text_deltas", side_effect=fake_stream_text_deltas),
+        ):
+            chunks = list(openai_v1_chat_complete.handle({
+                "model": "auto",
+                "stream": True,
+                "messages": [{"role": "user", "content": "who streamed this"}],
+            }))
+
+        self.assertTrue(any(chunk.get("_account_email") == "stream-account@example.test" for chunk in chunks))
+
     def test_responses_completed_usage_includes_cached_tokens(self) -> None:
         with (
             mock.patch("services.protocol.openai_v1_response.text_backend", return_value=object()),
@@ -157,6 +261,36 @@ class ChatCompletionCacheTests(unittest.TestCase):
         self.assertEqual(details["cached_tokens"], 0)
         output_details = response["usage"]["output_tokens_details"]
         self.assertEqual(output_details["reasoning_tokens"], 0)
+
+    def test_responses_text_preserves_internal_account_email_for_logs(self) -> None:
+        backend = SimpleNamespace()
+
+        def fake_stream_text_deltas(active_backend, _request):
+            active_backend._account_email = "responses-account@example.test"
+            yield "ok"
+
+        with (
+            mock.patch("services.protocol.openai_v1_response.text_backend", return_value=backend),
+            mock.patch("services.protocol.openai_v1_response.stream_text_deltas", side_effect=fake_stream_text_deltas),
+        ):
+            response = openai_v1_response.handle({
+                "model": "auto",
+                "input": "who executed responses",
+            })
+
+        self.assertEqual(response.get("_account_email"), "responses-account@example.test")
+
+    def test_text_delta_error_preserves_internal_account_email_for_failure_logs(self) -> None:
+        backend = SimpleNamespace(access_token="token-1")
+
+        with (
+            mock.patch("services.protocol.conversation.account_service.get_account", return_value={"email": "failed-account@example.test"}),
+            mock.patch("services.protocol.conversation.conversation_events", side_effect=RuntimeError("upstream failed")),
+        ):
+            with self.assertRaises(RuntimeError) as caught:
+                list(stream_text_deltas(backend, ConversationRequest(model="auto", messages=[{"role": "user", "content": "fail"}])))
+
+        self.assertEqual(getattr(caught.exception, "account_email", ""), "failed-account@example.test")
 
     def test_repeated_responses_text_request_uses_cache(self) -> None:
         calls = 0
@@ -180,7 +314,33 @@ class ChatCompletionCacheTests(unittest.TestCase):
             second = list(openai_v1_response.handle(body))
 
         self.assertEqual(calls, 1)
-        self.assertEqual(first, second)
+        self.assertEqual(first, without_cache_marker(second))
+        self.assertFalse(any(event.get("_cache_hit") for event in first))
+        self.assertTrue(any(event.get("_cache_hit") for event in second))
+
+    def test_repeated_responses_non_stream_marks_cache_hit(self) -> None:
+        calls = 0
+
+        def fake_stream_text_deltas(_backend, _request):
+            nonlocal calls
+            calls += 1
+            yield f"response cache {calls}"
+
+        body = {
+            "model": "auto",
+            "input": "cache this non-stream responses prompt",
+        }
+
+        with (
+            mock.patch("services.protocol.openai_v1_response.text_backend", return_value=object()),
+            mock.patch("services.protocol.openai_v1_response.stream_text_deltas", side_effect=fake_stream_text_deltas),
+        ):
+            first = openai_v1_response.handle(body)
+            second = openai_v1_response.handle(body)
+
+        self.assertEqual(calls, 1)
+        self.assertNotIn("_cache_hit", first)
+        self.assertIs(second.get("_cache_hit"), True)
 
     def test_output_sanitizer_removes_chatgpt_annotation_markup(self) -> None:
         text = (

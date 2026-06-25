@@ -8,7 +8,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
-from services.log_service import LoggedCall
+from services.log_service import LoggedCall, collect_request_image_input_urls
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -83,6 +83,8 @@ def create_router() -> APIRouter:
         await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
         images = await read_image_sources(image_sources)
         masks = await read_image_sources(mask_sources) if mask_sources else None
+        base_url = resolve_image_base_url(request)
+        request_urls = collect_request_image_input_urls(images, base_url)
         try:
             return await run_in_threadpool(
                 image_task_service.submit_edit,
@@ -92,9 +94,10 @@ def create_router() -> APIRouter:
                 model=model,
                 size=payload["size"],
                 quality=payload["quality"],
-                base_url=resolve_image_base_url(request),
+                base_url=base_url,
                 images=images,
                 masks=masks,
+                request_urls=request_urls,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc

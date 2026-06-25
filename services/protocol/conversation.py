@@ -297,6 +297,7 @@ class ConversationRequest:
     model: str = "auto"
     prompt: str = ""
     messages: list[dict[str, Any]] | None = None
+    thinking_effort: str = ""
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
@@ -655,6 +656,7 @@ def conversation_events(
     images: list[str] | None = None,
     size: str | None = None,
     quality: str = "auto",
+    thinking_effort: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -667,12 +669,33 @@ def conversation_events(
         prompt=final_prompt,
         images=images if image_model else None,
         system_hints=["picture_v2"] if image_model else None,
+        thinking_effort=thinking_effort if not image_model else "",
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
 
 def text_backend() -> OpenAIBackendAPI:
     return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
+
+
+def backend_account_email(backend: object) -> str:
+    return str(getattr(backend, "_account_email", "") or getattr(backend, "account_email", "") or "").strip()
+
+
+def remember_backend_account_email(backend: object, access_token: str) -> str:
+    account = account_service.get_account(access_token) or {}
+    email = str(account.get("email") or "").strip()
+    if email:
+        setattr(backend, "_account_email", email)
+    return email
+
+
+def attach_backend_account_email_to_error(exc: Exception, backend: object) -> None:
+    if getattr(exc, "account_email", ""):
+        return
+    email = backend_account_email(backend)
+    if email:
+        setattr(exc, "account_email", email)
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
@@ -685,8 +708,15 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         if token:
             attempted_tokens.add(token)
         try:
+            remember_backend_account_email(backend, token)
             active_backend = OpenAIBackendAPI(access_token=token)
-            for event in conversation_events(active_backend, messages=request.messages, model=request.model, prompt=request.prompt):
+            for event in conversation_events(
+                active_backend,
+                messages=request.messages,
+                model=request.model,
+                prompt=request.prompt,
+                thinking_effort=request.thinking_effort,
+            ):
                 if event.get("type") != "conversation.delta":
                     continue
                 delta = str(event.get("delta") or "")
@@ -706,6 +736,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     token = account_service.get_text_access_token(attempted_tokens)
                 if token:
                     continue
+            attach_backend_account_email_to_error(exc, backend)
             raise
 
 

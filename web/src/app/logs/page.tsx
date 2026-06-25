@@ -42,11 +42,20 @@ function getUrls(item: SystemLog | null) {
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
 }
 
+function getRequestUrls(item: SystemLog | null) {
+  const urls = item?.detail?.request_urls;
+  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
+
 function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
   return "-";
+}
+
+function isCacheHit(item: SystemLog) {
+  return item.detail?.cache_hit === true;
 }
 
 function LogsContent() {
@@ -73,7 +82,11 @@ function LogsContent() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const detailUrls = getUrls(detailLog);
-  const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
+  const detailRequestUrls = getRequestUrls(detailLog);
+  const requestText = typeof detailLog?.detail?.request_text === "string" ? detailLog.detail.request_text : "";
+  const responseText = typeof detailLog?.detail?.response_text === "string" ? detailLog.detail.response_text : "";
+  const isResponseTextTruncated = detailLog?.detail?.response_text_truncated === true;
+  const lightboxImages = [...detailRequestUrls, ...detailUrls].map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
   const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -248,7 +261,7 @@ function LogsContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[980px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
@@ -258,6 +271,7 @@ function LogsContent() {
                   {isCallLog ? <TableHead>执行账号</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
+                  {isCallLog ? <TableHead>缓存</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
@@ -280,6 +294,13 @@ function LogsContent() {
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
                             {getStatus(item)}
+                          </Badge>
+                        </TableCell>
+                      ) : null}
+                      {isCallLog ? (
+                        <TableCell>
+                          <Badge variant={isCacheHit(item) ? "secondary" : "outline"} className="rounded-md">
+                            {isCacheHit(item) ? "命中" : "否"}
                           </Badge>
                         </TableCell>
                       ) : null}
@@ -367,7 +388,7 @@ function LogsContent() {
               {/* 基础信息 */}
               <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
                 {Object.entries(detailLog?.detail || {})
-                  .filter(([key, value]) => key !== "urls" && key !== "request_text" && typeof value !== "object")
+                  .filter(([key, value]) => key !== "urls" && key !== "request_urls" && key !== "request_text" && key !== "response_text" && key !== "response_text_truncated" && typeof value !== "object")
                   .map(([key, value]) => (
                     <div key={key} className="flex items-start justify-between gap-4">
                       <span className="text-stone-400">{key}</span>
@@ -377,7 +398,7 @@ function LogsContent() {
               </div>
 
               {/* 请求内容 - 单独展示，支持展开/收起 */}
-              {detailLog?.detail?.request_text && (
+              {requestText && (
                 <div className="rounded-xl border border-stone-200 bg-white">
                   <div className="flex items-center justify-between border-b border-stone-100 px-4 py-3">
                     <span className="text-sm font-medium text-stone-700">请求内容</span>
@@ -385,8 +406,7 @@ function LogsContent() {
                       type="button"
                       className="text-xs text-stone-500 hover:text-stone-700"
                       onClick={() => {
-                        const text = String(detailLog.detail?.request_text || "");
-                        navigator.clipboard.writeText(text);
+                        navigator.clipboard.writeText(requestText);
                         toast.success("已复制到剪贴板");
                       }}
                     >
@@ -395,28 +415,74 @@ function LogsContent() {
                   </div>
                   <div className="p-4">
                     <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
-                      {String(detailLog.detail.request_text)}
+                      {requestText}
                     </pre>
                   </div>
                 </div>
               )}
 
-              {/* 图片 */}
-              {detailUrls.length ? (
-                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                  {detailUrls.map((url, index) => (
+              {responseText && (
+                <div className="rounded-xl border border-stone-200 bg-white">
+                  <div className="flex items-center justify-between border-b border-stone-100 px-4 py-3">
+                    <span className="text-sm font-medium text-stone-700">响应内容{isResponseTextTruncated ? "（已截断）" : ""}</span>
                     <button
-                      key={url}
                       type="button"
-                      className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
+                      className="text-xs text-stone-500 hover:text-stone-700"
                       onClick={() => {
-                        setLightboxIndex(index);
-                        setLightboxOpen(true);
+                        navigator.clipboard.writeText(responseText);
+                        toast.success("已复制到剪贴板");
                       }}
                     >
-                      <img src={url} alt="" className="h-full w-full object-cover" />
+                      复制
                     </button>
-                  ))}
+                  </div>
+                  <div className="p-4">
+                    <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
+                      {responseText}
+                    </pre>
+                  </div>
+                </div>
+              )}
+
+              {detailRequestUrls.length ? (
+                <div className="rounded-xl border border-stone-200 bg-white p-4">
+                  <div className="mb-3 text-sm font-medium text-stone-700">入参图片</div>
+                  <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                    {detailRequestUrls.map((url, index) => (
+                      <button
+                        key={url}
+                        type="button"
+                        className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
+                        onClick={() => {
+                          setLightboxIndex(index);
+                          setLightboxOpen(true);
+                        }}
+                      >
+                        <img src={url} alt="" className="h-full w-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {detailUrls.length ? (
+                <div className="rounded-xl border border-stone-200 bg-white p-4">
+                  <div className="mb-3 text-sm font-medium text-stone-700">生成图片</div>
+                  <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                    {detailUrls.map((url, index) => (
+                      <button
+                        key={url}
+                        type="button"
+                        className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
+                        onClick={() => {
+                          setLightboxIndex(detailRequestUrls.length + index);
+                          setLightboxOpen(true);
+                        }}
+                      >
+                        <img src={url} alt="" className="h-full w-full object-cover" />
+                      </button>
+                    ))}
+                  </div>
                 </div>
               ) : null}
 
@@ -444,7 +510,7 @@ function LogsContent() {
         </DialogContent>
       </Dialog>
       <ImageLightbox
-        images={detailImages}
+        images={lightboxImages}
         currentIndex={lightboxIndex}
         open={lightboxOpen}
         onOpenChange={setLightboxOpen}
