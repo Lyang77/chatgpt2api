@@ -136,6 +136,28 @@ class LoggedCallResponseTextTests(unittest.TestCase):
             ["https://example.test/input.png"],
         )
 
+    def test_collect_request_image_urls_keeps_compat_url_fields(self) -> None:
+        payload = {
+            "image_urls": [
+                "https://example.test/input-a.png",
+                "https://example.test/input-b.png",
+            ],
+            "input_image_url": "https://example.test/input-c.png",
+            "nested": {
+                "input_image_urls": ["https://example.test/input-d.png"],
+            },
+        }
+
+        self.assertEqual(
+            collect_request_image_urls(payload, "http://app.test"),
+            [
+                "https://example.test/input-a.png",
+                "https://example.test/input-b.png",
+                "https://example.test/input-c.png",
+                "https://example.test/input-d.png",
+            ],
+        )
+
     def test_collect_request_image_urls_saves_data_urls(self) -> None:
         data_url = "data:image/png;base64,ZmFrZS1pbWFnZQ=="
         payload = {"input": [{"type": "input_image", "image_url": data_url}]}
@@ -145,6 +167,16 @@ class LoggedCallResponseTextTests(unittest.TestCase):
             urls = collect_request_image_urls(payload, "http://app.test")
 
         self.assertEqual(urls, ["http://app.test/images/request-input.png"])
+        save.assert_called_once_with(b"fake-image", "http://app.test")
+
+    def test_collect_request_image_urls_saves_compat_base64_images(self) -> None:
+        payload = {"base64_images": ["ZmFrZS1pbWFnZQ=="]}
+        stored = SimpleNamespace(url="http://app.test/images/request-base64.png")
+
+        with mock.patch("services.log_service.image_storage_service.save", return_value=stored) as save:
+            urls = collect_request_image_urls(payload, "http://app.test")
+
+        self.assertEqual(urls, ["http://app.test/images/request-base64.png"])
         save.assert_called_once_with(b"fake-image", "http://app.test")
 
     def test_collect_request_image_urls_ignores_storage_failures(self) -> None:

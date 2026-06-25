@@ -27,6 +27,37 @@ INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_cache_hit"}
 MAX_RESPONSE_TEXT_CHARS = 12000
 LOG_LIST_OMITTED_DETAIL_KEYS = {"request_text", "response_text", "request_urls"}
 MAX_REQUEST_IMAGE_URLS = 12
+REQUEST_IMAGE_URL_KEYS = {
+    "image",
+    "image[]",
+    "images",
+    "images[]",
+    "image_url",
+    "image_url[]",
+    "image_urls",
+    "imageurl",
+    "imageurls",
+    "input_image_url",
+    "input_image_urls",
+    "inputimageurl",
+    "inputimageurls",
+    "reference_image",
+    "reference_images",
+    "reference_image_url",
+    "reference_image_urls",
+    "referenceimageurl",
+    "referenceimageurls",
+}
+REQUEST_IMAGE_BASE64_KEYS = {
+    "base64_image",
+    "base64_images",
+    "base64image",
+    "base64images",
+    "input_image_base64",
+    "input_image_base64s",
+    "inputimagebase64",
+    "inputimagebase64s",
+}
 
 
 class LogService:
@@ -238,6 +269,10 @@ def _decode_base64_image_text(value: object) -> bytes:
 def _collect_request_image_url_value(urls: list[str], value: object, base_url: str) -> None:
     if len(urls) >= MAX_REQUEST_IMAGE_URLS:
         return
+    if isinstance(value, list):
+        for item in value:
+            _collect_request_image_url_value(urls, item, base_url)
+        return
     if isinstance(value, dict):
         _collect_request_image_url_value(urls, value.get("url") or value.get("image_url"), base_url)
         return
@@ -253,16 +288,39 @@ def _collect_request_image_url_value(urls: list[str], value: object, base_url: s
         _add_unique_url(urls, saved_url)
 
 
+def _collect_request_base64_image_value(urls: list[str], value: object, base_url: str) -> None:
+    if len(urls) >= MAX_REQUEST_IMAGE_URLS:
+        return
+    if isinstance(value, list):
+        for item in value:
+            _collect_request_base64_image_value(urls, item, base_url)
+        return
+    if isinstance(value, dict):
+        _collect_request_base64_image_value(
+            urls,
+            value.get("data") or value.get("base64") or value.get("b64_json"),
+            base_url,
+        )
+        return
+    if not isinstance(value, str):
+        return
+    saved_url = _save_request_image(_decode_base64_image_text(value), base_url)
+    _add_unique_url(urls, saved_url)
+
+
 def _collect_request_images_from_value(urls: list[str], value: object, base_url: str, *, image_context: bool = False, key: str = "") -> None:
     if len(urls) >= MAX_REQUEST_IMAGE_URLS:
         return
+    normalized_key = key.strip().lower()
     if isinstance(value, list):
         for item in value:
             _collect_request_images_from_value(urls, item, base_url, image_context=image_context, key=key)
         return
     if isinstance(value, str):
-        if image_context or key in {"image_url", "image", "images"}:
+        if image_context or normalized_key in REQUEST_IMAGE_URL_KEYS:
             _collect_request_image_url_value(urls, value, base_url)
+        if normalized_key in REQUEST_IMAGE_BASE64_KEYS:
+            _collect_request_base64_image_value(urls, value, base_url)
         return
     if not isinstance(value, dict):
         return
@@ -286,10 +344,14 @@ def _collect_request_images_from_value(urls: list[str], value: object, base_url:
 
     handled_image_keys = {"image_url", "url", "b64_json", "base64", "source", "data"}
     for child_key, child in value.items():
-        if next_image_context and child_key in handled_image_keys:
+        normalized_child_key = str(child_key).strip().lower()
+        if next_image_context and normalized_child_key in handled_image_keys:
             continue
-        if child_key in {"image_url"}:
+        if normalized_child_key in REQUEST_IMAGE_URL_KEYS:
             _collect_request_image_url_value(urls, child, base_url)
+            continue
+        if normalized_child_key in REQUEST_IMAGE_BASE64_KEYS:
+            _collect_request_base64_image_value(urls, child, base_url)
             continue
         _collect_request_images_from_value(urls, child, base_url, image_context=next_image_context, key=str(child_key))
 
