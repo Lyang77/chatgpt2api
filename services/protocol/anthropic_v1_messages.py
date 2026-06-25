@@ -11,7 +11,7 @@ from typing import Any
 
 from services.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
-from services.protocol.conversation import count_message_tokens, count_text_tokens, normalize_messages
+from services.protocol.conversation import backend_account_email, count_message_tokens, count_text_tokens, normalize_messages
 from services.protocol.openai_v1_chat_complete import collect_chat_content, stream_text_chat_completion
 
 XML_TOOL_RULE = """Tool output adapter: when calling tools, output ONLY this XML and no prose/markdown:
@@ -297,10 +297,12 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
             request.tools,
         )
     text = collect_chat_content(stream_text_chat_completion(request.backend, request.messages, request.model))
-    return message_response(
+    response = message_response(
         request.model,
         text,
         count_message_tokens(request.messages, request.model),
         count_text_tokens(text, request.model),
         request.tools,
     )
+    email = backend_account_email(request.backend)
+    return {**response, "_account_email": email} if email else response

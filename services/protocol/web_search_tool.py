@@ -155,6 +155,10 @@ def text_with_url_citations(result: dict[str, Any]) -> tuple[str, list[dict[str,
 
 def run_web_search(query: str) -> dict[str, Any]:
     token = account_service.get_text_access_token()
+    account = account_service.get_account(token) or {}
     result = OpenAIBackendAPI(token).search(query)
     account_service.mark_text_used(token)
+    email = str(account.get("email") or "").strip()
+    if email:
+        result["_account_email"] = email
     return result

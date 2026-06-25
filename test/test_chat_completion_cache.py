@@ -7,7 +7,7 @@ import base64
 from types import SimpleNamespace
 
 from services.config import config
-from services.protocol import openai_v1_chat_complete, openai_v1_response
+from services.protocol import anthropic_v1_messages, openai_v1_chat_complete, openai_v1_response
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache
 from services.protocol.conversation import ConversationRequest, iter_conversation_payloads, sanitize_output_text, stream_text_deltas
 from utils.helper import extract_image_from_message_content
@@ -401,6 +401,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
         search_result = {
             "answer": "Latest answer.",
             "sources": [{"title": "Example", "url": "https://example.com/news", "snippet": "Snippet"}],
+            "_account_email": "search-response@example.test",
         }
         body = {
             "model": "auto",
@@ -421,11 +422,13 @@ class ChatCompletionCacheTests(unittest.TestCase):
         self.assertIn("Latest answer.", content["text"])
         self.assertEqual(content["annotations"][0]["type"], "url_citation")
         self.assertEqual(content["annotations"][0]["url"], "https://example.com/news")
+        self.assertEqual(response.get("_account_email"), "search-response@example.test")
 
     def test_responses_web_search_tool_streams_search_events(self) -> None:
         search_result = {
             "answer": "Streamed search answer.",
             "sources": [{"title": "Example", "url": "https://example.com/stream", "snippet": ""}],
+            "_account_email": "search-stream@example.test",
         }
         body = {
             "model": "auto",
@@ -444,6 +447,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
         completed = events[-1]["response"]
         self.assertEqual(completed["output"][0]["type"], "web_search_call")
         self.assertEqual(completed["output"][1]["type"], "message")
+        self.assertTrue(any(event.get("_account_email") == "search-stream@example.test" for event in events))
 
     def test_responses_versioned_web_search_tool_returns_search_output(self) -> None:
         search_result = {
@@ -467,6 +471,7 @@ class ChatCompletionCacheTests(unittest.TestCase):
         search_result = {
             "answer": "Chat search answer.",
             "sources": [{"title": "Example", "url": "https://example.com/chat", "snippet": ""}],
+            "_account_email": "chat-search@example.test",
         }
         body = {
             "model": "auto",
@@ -482,6 +487,26 @@ class ChatCompletionCacheTests(unittest.TestCase):
         self.assertIn("Chat search answer.", message["content"])
         self.assertEqual(message["annotations"][0]["type"], "url_citation")
         self.assertEqual(message["annotations"][0]["url_citation"]["url"], "https://example.com/chat")
+        self.assertEqual(response.get("_account_email"), "chat-search@example.test")
+
+    def test_anthropic_non_stream_preserves_internal_account_email_for_logs(self) -> None:
+        backend = SimpleNamespace()
+
+        def fake_stream_text_chat_completion(active_backend, _messages, _model):
+            active_backend._account_email = "messages-account@example.test"
+            yield {"choices": [{"delta": {"role": "assistant", "content": "hello"}, "finish_reason": None}]}
+
+        with (
+            mock.patch("services.protocol.anthropic_v1_messages.OpenAIBackendAPI", return_value=backend),
+            mock.patch("services.protocol.anthropic_v1_messages.account_service.get_text_access_token", return_value="token-1"),
+            mock.patch("services.protocol.anthropic_v1_messages.stream_text_chat_completion", side_effect=fake_stream_text_chat_completion),
+        ):
+            response = anthropic_v1_messages.handle({
+                "model": "auto",
+                "messages": [{"role": "user", "content": "who executed messages"}],
+            })
+
+        self.assertEqual(response.get("_account_email"), "messages-account@example.test")
 
     def test_chat_completions_web_search_options_trigger_search(self) -> None:
         search_result = {
