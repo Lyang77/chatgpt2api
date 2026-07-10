@@ -520,6 +520,7 @@ class LoggedCall:
     request_urls: list[str] | None = None
 
     async def run(self, handler, *args, sse: str = "openai"):
+        from services.account_service import AccountModelUnavailableError
         from services.protocol.conversation import ImageGenerationError
 
         try:
@@ -531,6 +532,9 @@ class LoggedCall:
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
+        except AccountModelUnavailableError as exc:
+            self.log("调用失败", status="failed", error=str(exc))
+            return _protocol_error_response(exc, 503, sse)
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
@@ -552,6 +556,9 @@ class LoggedCall:
         except HTTPException as exc:
             self.log("调用失败", status="failed", error=str(exc.detail))
             raise
+        except AccountModelUnavailableError as exc:
+            self.log("调用失败", status="failed", error=str(exc))
+            return _protocol_error_response(exc, 503, sse)
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):

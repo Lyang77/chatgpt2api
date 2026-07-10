@@ -338,7 +338,7 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
     yield {"type": "response.output_item.added", "output_index": 0, "item": searching_item}
     yield {"type": "response.web_search_call.in_progress", "output_index": 0, "item_id": search_id}
     yield {"type": "response.web_search_call.searching", "output_index": 0, "item_id": search_id}
-    result = run_web_search(query)
+    result = run_web_search(query, model)
     search_item = web_search_call_item(query, search_id, "completed", normalized_sources(result))
     yield {"type": "response.web_search_call.completed", "output_index": 0, "item_id": search_id}
     yield {"type": "response.output_item.done", "output_index": 0, "item": search_item}
@@ -419,7 +419,7 @@ def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
         key = cache_key(body, messages, stream=bool(body.get("stream")))
         yield from chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_response(text_backend(), body, messages),
+            lambda: stream_text_response(text_backend(model), body, messages),
         )
         return
 

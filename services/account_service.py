@@ -21,6 +21,12 @@ from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
 
+class AccountModelUnavailableError(RuntimeError):
+    def __init__(self, model: str):
+        self.model = str(model or "").strip()
+        super().__init__(f"no available account supports model {self.model}")
+
+
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
@@ -203,6 +209,23 @@ class AccountService:
                     return plan
         return None
 
+    @staticmethod
+    def _normalize_allowed_models(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return list(dict.fromkeys(
+            model
+            for item in value
+            if (model := str(item or "").strip().lower())
+        ))
+
+    def account_allows_model(self, account: dict, model: str) -> bool:
+        allowed_models = self._normalize_allowed_models(account.get("allowed_models"))
+        if not allowed_models:
+            return True
+        requested_model = str(model or "").strip().lower()
+        return requested_model != "auto" and requested_model in allowed_models
+
     def _normalize_account(self, item: dict) -> dict | None:
         if not isinstance(item, dict):
             return None
@@ -227,6 +250,7 @@ class AccountService:
         normalized["source_type"] = self._normalize_source_type(source_type)
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
+        normalized["allowed_models"] = self._normalize_allowed_models(normalized.get("allowed_models"))
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
         normalized["success"] = int(normalized.get("success") or 0)
@@ -892,6 +916,7 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            model: str = "",
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
@@ -901,6 +926,7 @@ class AccountService:
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
+               and self.account_allows_model(item, model)
                and (token := item.get("access_token") or "")
                and token not in excluded
         ]
@@ -911,13 +937,29 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            model: str = "",
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, model)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
+
+    def _has_configured_image_model_candidate(
+            self,
+            plan_type: str | None = None,
+            source_type: str | None = None,
+            plan_types: set[str] | tuple[str, ...] | None = None,
+            model: str = "",
+    ) -> bool:
+        return bool(model) and any(
+            self._account_matches_plan_type(item, plan_type)
+            and self._account_matches_any_plan_type(item, plan_types)
+            and self._account_matches_source_type(item, source_type)
+            and self.account_allows_model(item, model)
+            for item in self._accounts.values()
+        )
 
     def _acquire_next_candidate_token(
             self,
@@ -925,15 +967,20 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            model: str = "",
     ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
+                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, model):
+                    if model and not self._has_configured_image_model_candidate(
+                            plan_type, source_type, plan_types, model
+                    ):
+                        raise AccountModelUnavailableError(model)
                     raise RuntimeError(
                         f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
                         if plan_type or source_type else "no available image quota"
                     )
-                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, model)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
@@ -958,6 +1005,7 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            model: str = "",
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -972,6 +1020,7 @@ class AccountService:
                 plan_type=plan_type,
                 source_type=source_type,
                 plan_types=plan_types,
+                model=model,
             )
             attempted_tokens.add(access_token)
             try:
@@ -989,26 +1038,34 @@ class AccountService:
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
+                    and self.account_allows_model(account or {}, model)
             ):
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
+        with self._lock:
+            has_configured_model_candidate = self._has_configured_image_model_candidate(
+                plan_type, source_type, plan_types, model
+            )
+        if model and not has_configured_model_candidate:
+            raise AccountModelUnavailableError(model)
         raise RuntimeError(
             f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
             if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
         )
 
-    def get_text_access_token(self, excluded_tokens: set[str] | None = None) -> str:
+    def get_text_access_token(self, model: str = "auto", excluded_tokens: set[str] | None = None) -> str:
         excluded = set(excluded_tokens or set())
         with self._lock:
             candidates = [
                 token
                 for account in self._accounts.values()
                 if account.get("status") not in {"禁用", "异常"}
+                   and self.account_allows_model(account, model)
                    and (token := account.get("access_token") or "")
                    and token not in excluded
             ]
             if not candidates:
-                return ""
+                raise AccountModelUnavailableError(model)
             access_token = candidates[self._index % len(candidates)]
             self._index += 1
         return self.refresh_access_token(access_token, event="get_text_access_token") or access_token

@@ -153,8 +153,8 @@ def text_with_url_citations(result: dict[str, Any]) -> tuple[str, list[dict[str,
     return text.strip(), annotations
 
 
-def run_web_search(query: str) -> dict[str, Any]:
-    token = account_service.get_text_access_token()
+def run_web_search(query: str, model: str) -> dict[str, Any]:
+    token = account_service.get_text_access_token(model)
     result = OpenAIBackendAPI(token).search(query)
     account_service.mark_text_used(token)
     return result

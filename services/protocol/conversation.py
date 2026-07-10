@@ -11,7 +11,7 @@ from typing import Any, Iterable, Iterator
 
 import tiktoken
 
-from services.account_service import account_service
+from services.account_service import AccountModelUnavailableError, account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
@@ -303,6 +303,7 @@ class ConversationRequest:
     n: int = 1
     size: str | None = None
     quality: str = "auto"
+    output_format: str = "png"
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
@@ -675,8 +676,8 @@ def conversation_events(
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
 
-def text_backend() -> OpenAIBackendAPI:
-    return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
+def text_backend(model: str) -> OpenAIBackendAPI:
+    return OpenAIBackendAPI(access_token=account_service.get_text_access_token(model))
 
 
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
@@ -714,7 +715,7 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     token = refreshed_token
                 else:
                     account_service.remove_invalid_token(token, "text_stream")
-                    token = account_service.get_text_access_token(attempted_tokens)
+                    token = account_service.get_text_access_token(request.model, attempted_tokens)
                 if token:
                     continue
             raise
@@ -1231,6 +1232,7 @@ def stream_codex_image_outputs(
         images=request.images or [],
         size=request.size,
         quality=request.quality,
+        output_format=request.output_format,
     )))
     if not images:
         raise ImageGenerationError("No image result found in response")
@@ -1282,8 +1284,17 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                model=request.model,
             )
         except RuntimeError as exc:
+            if isinstance(exc, AccountModelUnavailableError):
+                raise ImageGenerationError(
+                    str(exc),
+                    status_code=503,
+                    error_type="service_unavailable",
+                    code="model_account_unavailable",
+                    account_email=account_email,
+                ) from exc
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
 
         emitted_for_token = False

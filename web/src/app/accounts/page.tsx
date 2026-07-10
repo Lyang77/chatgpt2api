@@ -35,6 +35,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Select,
   SelectContent,
@@ -165,6 +166,10 @@ function displayAccountSource(account: Account) {
   return source;
 }
 
+function parseAllowedModels(value: string) {
+  return Array.from(new Set(value.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean)));
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -178,6 +183,7 @@ function AccountsPageContent() {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [editProxy, setEditProxy] = useState("");
+  const [editAllowedModels, setEditAllowedModels] = useState("");
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
@@ -653,6 +659,7 @@ function AccountsPageContent() {
     setEditingAccount(account);
     setEditStatus(account.status);
     setEditProxy(account.proxy ?? "");
+    setEditAllowedModels((account.allowed_models ?? []).join("\n"));
   };
 
   const handleTestAccountProxy = async () => {
@@ -684,6 +691,7 @@ function AccountsPageContent() {
       const data = await updateAccount(editingAccount.access_token, {
         status: editStatus,
         proxy: editProxy.trim(),
+        allowed_models: parseAllowedModels(editAllowedModels),
       });
       setAccounts(data.items);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
@@ -782,7 +790,7 @@ function AccountsPageContent() {
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              手动修改账号状态和专属代理。
+              手动修改账号状态、专属代理和允许模型。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -822,6 +830,16 @@ function AccountsPageContent() {
                   测试
                 </Button>
               </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">允许模型</label>
+              <Textarea
+                value={editAllowedModels}
+                onChange={(event) => setEditAllowedModels(event.target.value)}
+                placeholder={"gpt-5-3\ngpt-5-5"}
+                className="min-h-24 rounded-xl border-stone-200 bg-white"
+              />
+              <p className="text-xs text-stone-500">留空不限</p>
             </div>
           </div>
           <DialogFooter className="pt-2">
@@ -1047,6 +1065,7 @@ function AccountsPageContent() {
                     <th className="w-56 px-4 py-3">token</th>
                     <th className="w-28 px-4 py-3">类型</th>
                     <th className="w-24 px-4 py-3">来源</th>
+                    <th className="w-48 px-4 py-3">允许模型</th>
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-56 px-4 py-3">账号信息</th>
                     <th className="w-32 px-4 py-3">创建时间</th>
@@ -1106,6 +1125,19 @@ function AccountsPageContent() {
                           <Badge variant="outline" className="rounded-md border-stone-200 text-stone-600">
                             {displayAccountSource(account)}
                           </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          {(account.allowed_models ?? []).length > 0 ? (
+                            <div className="flex max-w-48 flex-wrap gap-1">
+                              {(account.allowed_models ?? []).map((model) => (
+                                <Badge key={model} variant="secondary" className="max-w-44 truncate rounded-md bg-stone-100 text-stone-700" title={model}>
+                                  {model}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <Badge variant="outline" className="rounded-md border-stone-200 text-stone-500">不限</Badge>
+                          )}
                         </td>
                         <td className="px-4 py-3">
                           <Badge

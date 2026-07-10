@@ -37,6 +37,7 @@ export type Account = {
   image_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
+  allowed_models?: string[];
 };
 
 export type AccountImportPayload = {
@@ -400,6 +401,7 @@ export async function updateAccount(
     status?: AccountStatus;
     quota?: number;
     proxy?: string;
+    allowed_models?: string[];
   },
 ) {
   return httpRequest<AccountUpdateResponse>("/api/accounts/update", {

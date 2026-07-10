@@ -202,7 +202,7 @@ def web_search_chat_response(messages: list[dict[str, Any]], model: str) -> dict
     query = search_query_from_messages(messages)
     if not query:
         raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
-    text, annotations = text_with_url_citations(run_web_search(query))
+    text, annotations = text_with_url_citations(run_web_search(query, model))
     return completion_response(
         model,
         text,
@@ -215,7 +215,7 @@ def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str
     query = search_query_from_messages(messages)
     if not query:
         raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
-    text, _annotations = text_with_url_citations(run_web_search(query))
+    text, _annotations = text_with_url_citations(run_web_search(query, model))
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     yield completion_chunk(model, {"role": "assistant", "content": text}, None, completion_id, created)
@@ -297,7 +297,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         key = cache_key(body, messages, stream=True)
         return chat_completion_cache.get_or_compute_stream(
             key,
-            lambda: stream_text_chat_completion(text_backend(), messages, model, thinking_effort),
+            lambda: stream_text_chat_completion(text_backend(model), messages, model, thinking_effort),
         )
     if is_image_chat_request(body):
         return image_chat_response(body)
@@ -310,7 +310,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         key,
         lambda: completion_response(
             model,
-            collect_text(text_backend(), ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
+            collect_text(text_backend(model), ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
             messages=messages,
         ),
     )
