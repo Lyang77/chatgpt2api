@@ -33,7 +33,16 @@ function getDetailText(item: SystemLog, key: string) {
   return typeof value === "string" || typeof value === "number" ? String(value) : "-";
 }
 
-function formatDuration(item: SystemLog) {
+function formatDuration(item: SystemLog, now: number) {
+  if (item.detail?.status === "running") {
+    const startedAt = item.detail?.started_at;
+    if (typeof startedAt === "string") {
+      const startedAtMs = new Date(startedAt.replace(" ", "T")).getTime();
+      if (!Number.isNaN(startedAtMs)) {
+        return `${(Math.max(0, now - startedAtMs) / 1000).toFixed(2)} s`;
+      }
+    }
+  }
   const value = item.detail?.duration_ms;
   return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
 }
@@ -97,6 +106,7 @@ function getStatus(item: SystemLog) {
 
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
+  const [now, setNow] = useState(() => Date.now());
   const [type, setType] = useState<string>(LogType.Call);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -131,6 +141,7 @@ function LogsContent() {
   );
   const responseTextTruncated = detailLog?.detail?.response_text_truncated === true;
   const isCallLog = type === LogType.Call;
+  const hasRunningCallLogs = isCallLog && items.some((item) => item.detail?.status === "running");
   const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
@@ -247,6 +258,12 @@ function LogsContent() {
     void loadLogs(1);
   }, [type, startDate, endDate]);
 
+  useEffect(() => {
+    if (!hasRunningCallLogs) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasRunningCallLogs]);
+
   return (
     <section className="space-y-5">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -361,7 +378,7 @@ function LogsContent() {
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {isCallLog ? <TableCell className="max-w-[160px] truncate">{getDetailText(item, "account_email")}</TableCell> : null}
-                      {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
+                      {isCallLog ? <TableCell>{formatDuration(item, now)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : item.detail?.status === "running" ? "warning" : item.detail?.status === "stopped" ? "secondary" : "success"} className="rounded-md">
@@ -461,7 +478,7 @@ function LogsContent() {
                   ["模型", getDetailValue(detailLog, "model")],
                   ["执行账号", getDetailValue(detailLog, "account_email")],
                   ["状态", getStatus(detailLog || { id: "", time: "", type: "" })],
-                  ["调用耗时", formatDuration(detailLog || { id: "", time: "", type: "" })],
+                  ["调用耗时", formatDuration(detailLog || { id: "", time: "", type: "" }, now)],
                   ["开始时间", getDetailValue(detailLog, "started_at")],
                   ["结束时间", getDetailValue(detailLog, "ended_at")],
                   ["Key", getDetailValue(detailLog, "key_name")],
