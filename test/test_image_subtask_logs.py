@@ -55,6 +55,7 @@ class ImageTaskRegistryTests(unittest.TestCase):
 
         item = self.service.get_by_id(context.log_id)
 
+        self.assertEqual(item["summary"], "文生图")
         self.assertEqual(item["detail"]["status"], "running")
         self.assertEqual(item["detail"]["batch_id"], "batch-1")
         self.assertEqual(item["detail"]["image_index"], 2)

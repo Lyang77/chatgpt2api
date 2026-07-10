@@ -290,13 +290,14 @@ function LogsContent() {
           <input type="text" placeholder="模型" value={model} onChange={(e) => setModel(e.target.value)} className="h-10 w-[140px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400" />
           <input type="text" placeholder="接口" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="h-10 w-[170px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400" />
           <input type="text" placeholder="批次 ID" value={batchId} onChange={(e) => setBatchId(e.target.value)} className="h-10 w-[150px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400" />
-          <input
-            type="text"
-            placeholder="简述"
-            value={summary}
-            onChange={(e) => setSummary(e.target.value)}
-            className="h-10 w-[160px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400"
-          />
+          <Select value={summary || "all"} onValueChange={(value) => setSummary(value === "all" ? "" : value)}>
+            <SelectTrigger className="h-10 w-[140px] rounded-xl border-stone-200 bg-white"><SelectValue placeholder="简述类型" /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部简述</SelectItem>
+              <SelectItem value="文生图">文生图</SelectItem>
+              <SelectItem value="prompt生成">prompt生成</SelectItem>
+            </SelectContent>
+          </Select>
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>

@@ -185,7 +185,6 @@ class LogService:
             return True, updated
         return True, self.update_call(
             log_id,
-            summary="文生图 已停止",
             detail_patch={"status": "stopped", "stage": "stopped", "stopped_at": stop_requested_at},
         )
 
@@ -254,7 +253,7 @@ def create_image_task_log_context(
         "stage": "getting_account",
         "retry_count": 0,
     })
-    item = service.create_call(detail, "文生图 进行中")
+    item = service.create_call(detail, "文生图")
     return ImageTaskLogContext(
         log_id=str(item["id"]),
         batch_id=batch_id,

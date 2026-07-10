@@ -1296,17 +1296,16 @@ def _generate_single_image(
     try:
         outputs = _generate_single_image_with_context(request, index, total, context)
     except ImageGenerationStopped:
-        _update_image_task_log(context, summary="文生图 已停止", status="stopped", stage="stopped", stopped_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        _update_image_task_log(context, status="stopped", stage="stopped", stopped_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         raise
     except Exception as exc:
-        _update_image_task_log(context, summary="文生图 失败", status="failed", stage="failed", error=str(exc))
+        _update_image_task_log(context, status="failed", stage="failed", error=str(exc))
         raise
     else:
         status = "success" if any(output.kind == "result" for output in outputs) else "failed"
         result_payload = {"data": [item for output in outputs for item in output.data]}
         _update_image_task_log(
             context,
-            summary="文生图 完成" if status == "success" else "文生图 失败",
             status=status,
             stage=status,
             response_image_urls=collect_response_image_urls(result_payload, request.base_url or ""),

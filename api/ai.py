@@ -154,7 +154,7 @@ def create_router() -> APIRouter:
             identity,
             "/v1/images/edits",
             model,
-            "图生图",
+            "文生图",
             request_text=prompt,
             image_base_url=image_base_url,
         )
@@ -194,7 +194,7 @@ def create_router() -> APIRouter:
             identity,
             "/v1/chat/completions",
             model,
-            "文本生成",
+            "prompt生成",
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
             request_urls=collect_request_image_urls(payload, image_base_url),
@@ -218,7 +218,7 @@ def create_router() -> APIRouter:
             identity,
             "/v1/responses",
             model,
-            "Responses",
+            "prompt生成",
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
             request_urls=collect_request_image_urls(payload, image_base_url),
@@ -244,7 +244,7 @@ def create_router() -> APIRouter:
             identity,
             "/v1/messages",
             model,
-            "Messages",
+            "prompt生成",
             request_text=request_preview,
             request_urls=collect_request_image_urls(payload, image_base_url),
             image_base_url=image_base_url,
@@ -255,7 +255,7 @@ def create_router() -> APIRouter:
     @router.post("/v1/search")
     async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        call = LoggedCall(identity, "/v1/search", openai_search.MODEL, "搜索", request_text=body.prompt)
+        call = LoggedCall(identity, "/v1/search", openai_search.MODEL, "prompt生成", request_text=body.prompt)
         await filter_or_log(call, body.prompt)
         return await call.run(openai_search.handle, body.model_dump(mode="python"))
 
