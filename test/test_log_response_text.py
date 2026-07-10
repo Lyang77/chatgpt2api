@@ -218,6 +218,16 @@ class LoggedCallResponseTextTests(unittest.TestCase):
         self.assertEqual(urls, ["http://app.test/images/request-base64.png"])
         save.assert_called_once_with(b"fake-image", "http://app.test")
 
+    def test_collect_request_images_does_not_resave_base64_when_input_has_url(self) -> None:
+        existing_url = "http://app.test/images/already-saved-input.png"
+        payload = {"input": [{"type": "input_image", "image_url": existing_url, "b64_json": "ZmFrZS1pbWFnZQ=="}]}
+
+        with mock.patch("services.log_service.image_storage_service.save") as save:
+            urls = collect_request_image_urls(payload, "http://app.test")
+
+        self.assertEqual(urls, [existing_url])
+        save.assert_not_called()
+
     def test_collect_request_image_urls_ignores_storage_failures(self) -> None:
         data_url = "data:image/png;base64,ZmFrZS1pbWFnZQ=="
         payload = {"input": [{"type": "input_image", "image_url": data_url}]}

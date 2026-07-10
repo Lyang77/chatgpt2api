@@ -338,6 +338,16 @@ def _collect_request_image_url_value(urls: list[str], value: object, base_url: s
         _add_unique_url(urls, saved_url)
 
 
+def _has_supported_image_url(value: object) -> bool:
+    if isinstance(value, list):
+        return any(_has_supported_image_url(item) for item in value)
+    if isinstance(value, dict):
+        return _has_supported_image_url(value.get("url") or value.get("image_url"))
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower().startswith(("http://", "https://", "data:image/"))
+
+
 def _collect_request_base64_image_value(urls: list[str], value: object, base_url: str) -> None:
     if len(urls) >= MAX_REQUEST_IMAGE_URLS:
         return
@@ -377,18 +387,20 @@ def _collect_request_images_from_value(urls: list[str], value: object, base_url:
 
     item_type = str(value.get("type") or "").strip()
     next_image_context = image_context or item_type in {"image_url", "input_image", "image"}
+    image_url = value.get("image_url") or value.get("url")
+    has_image_url = _has_supported_image_url(image_url)
     if item_type in {"image_url", "input_image", "image"}:
-        _collect_request_image_url_value(urls, value.get("image_url") or value.get("url"), base_url)
+        _collect_request_image_url_value(urls, image_url, base_url)
     if next_image_context:
         inline = value.get("b64_json") or value.get("base64")
-        saved_url = _save_request_image(_decode_base64_image_text(inline), base_url) if inline else ""
+        saved_url = _save_request_image(_decode_base64_image_text(inline), base_url) if inline and not has_image_url else ""
         _add_unique_url(urls, saved_url)
         source = value.get("source")
-        if isinstance(source, dict) and str(source.get("type") or "").strip() == "base64":
+        if not has_image_url and isinstance(source, dict) and str(source.get("type") or "").strip() == "base64":
             saved_url = _save_request_image(_decode_base64_image_text(source.get("data")), base_url)
             _add_unique_url(urls, saved_url)
         data = value.get("data")
-        if isinstance(data, (bytes, bytearray)):
+        if not has_image_url and isinstance(data, (bytes, bytearray)):
             saved_url = _save_request_image(bytes(data), base_url)
             _add_unique_url(urls, saved_url)
 
