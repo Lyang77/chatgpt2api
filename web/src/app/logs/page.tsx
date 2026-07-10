@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 
 const LogType = {
@@ -42,11 +42,6 @@ function getUrls(item: SystemLog | null) {
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
 }
 
-function getRequestUrls(item: SystemLog | null) {
-  const urls = item?.detail?.request_urls;
-  return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
-}
-
 function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
@@ -54,62 +49,38 @@ function getStatus(item: SystemLog) {
   return "-";
 }
 
-function isCacheHit(item: SystemLog) {
-  return item.detail?.cache_hit === true;
-}
-
 function LogsContent() {
   const [items, setItems] = useState<SystemLog[]>([]);
   const [type, setType] = useState<string>(LogType.Call);
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [keyName, setKeyName] = useState("");
-  const [accountEmail, setAccountEmail] = useState("");
-  const [status, setStatus] = useState("");
-  const [summary, setSummary] = useState("");
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [isDetailLoading, setIsDetailLoading] = useState(false);
-  const [showRawJson, setShowRawJson] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
-  const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const detailUrls = getUrls(detailLog);
-  const detailRequestUrls = getRequestUrls(detailLog);
-  const requestText = typeof detailLog?.detail?.request_text === "string" ? detailLog.detail.request_text : "";
-  const responseText = typeof detailLog?.detail?.response_text === "string" ? detailLog.detail.response_text : "";
-  const isResponseTextTruncated = detailLog?.detail?.response_text_truncated === true;
-  const lightboxImages = [...detailRequestUrls, ...detailUrls].map((url, index) => ({ id: `${index}`, src: url }));
+  const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
-  const currentRows = items;
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(items.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const currentRows = items.slice((safePage - 1) * pageSize, safePage * pageSize);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
+  const allSelected = items.length > 0 && items.every((item) => selectedSet.has(item.id));
 
-  const loadLogs = async (targetPage?: number, targetPageSize?: number) => {
+  const loadLogs = async () => {
     setIsLoading(true);
     try {
-      const data = await fetchSystemLogs({
-        type,
-        start_date: startDate,
-        end_date: endDate,
-        page: targetPage ?? page,
-        page_size: targetPageSize ?? pageSize,
-        key_name: keyName,
-        account_email: accountEmail,
-        status,
-        summary,
-      });
+      const data = await fetchSystemLogs({ type, start_date: startDate, end_date: endDate });
       setItems(data.items);
-      setTotal(data.total);
-      setTotalPages(data.total_pages);
       setSelectedIds((current) => current.filter((id) => data.items.some((item) => item.id === id)));
+      setPage(1);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "加载日志失败");
     } finally {
@@ -120,25 +91,11 @@ function LogsContent() {
   const clearFilters = () => {
     setStartDate("");
     setEndDate("");
-    setKeyName("");
-    setAccountEmail("");
-    setStatus("");
-    setSummary("");
   };
 
-  const openDetail = async (item: SystemLog) => {
+  const openDetail = (item: SystemLog) => {
     setDetailLog(item);
     setDetailOpen(true);
-    setShowRawJson(false);
-    setIsDetailLoading(true);
-    try {
-      const fullDetail = await fetchSystemLogDetail(item.id);
-      setDetailLog(fullDetail);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "加载日志详情失败");
-    } finally {
-      setIsDetailLoading(false);
-    }
   };
 
   const openLogImage = (item: SystemLog, index: number) => {
@@ -164,10 +121,7 @@ function LogsContent() {
         setDetailOpen(false);
         setDetailLog(null);
       }
-      // 删除后保持当前页，如果当前页没数据了且不是第1页，回退到前一页
-      const nextPage = items.length <= ids.length && page > 1 ? page - 1 : page;
-      setPage(nextPage);
-      await loadLogs(nextPage);
+      await loadLogs();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "删除日志失败");
     } finally {
@@ -176,8 +130,7 @@ function LogsContent() {
   };
 
   useEffect(() => {
-    setPage(1);
-    void loadLogs(1);
+    void loadLogs();
   }, [type, startDate, endDate]);
 
   return (
@@ -196,39 +149,10 @@ function LogsContent() {
             </SelectContent>
           </Select>
           <DateRangeFilter startDate={startDate} endDate={endDate} onChange={(start, end) => { setStartDate(start); setEndDate(end); }} />
-          <input
-            type="text"
-            placeholder="令牌名称"
-            value={keyName}
-            onChange={(e) => setKeyName(e.target.value)}
-            className="h-10 w-[140px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400"
-          />
-          <input
-            type="text"
-            placeholder="执行账号"
-            value={accountEmail}
-            onChange={(e) => setAccountEmail(e.target.value)}
-            className="h-10 w-[180px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400"
-          />
-          <Select value={status || "all"} onValueChange={(v) => setStatus(v === "all" ? "" : v)}>
-            <SelectTrigger className="h-10 w-[100px] rounded-xl border-stone-200 bg-white"><SelectValue placeholder="状态" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">全部</SelectItem>
-              <SelectItem value="success">成功</SelectItem>
-              <SelectItem value="failed">失败</SelectItem>
-            </SelectContent>
-          </Select>
-          <input
-            type="text"
-            placeholder="简述"
-            value={summary}
-            onChange={(e) => setSummary(e.target.value)}
-            className="h-10 w-[160px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400"
-          />
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>
-          <Button onClick={() => { setPage(1); void loadLogs(1); }} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
+          <Button onClick={() => void loadLogs()} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
@@ -239,10 +163,14 @@ function LogsContent() {
         <CardContent className="p-0">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-stone-100 px-5 py-4">
             <div className="flex flex-wrap items-center gap-3 text-sm text-stone-600">
-              <span>共 {total} 条</span>
+              <span>共 {items.length} 条</span>
               <label className="flex items-center gap-2">
                 <Checkbox checked={currentPageSelected} onCheckedChange={(checked) => toggleIds(currentRows.map((item) => item.id), Boolean(checked))} />
                 本页全选
+              </label>
+              <label className="flex items-center gap-2">
+                <Checkbox checked={allSelected} onCheckedChange={(checked) => toggleIds(items.map((item) => item.id), Boolean(checked))} />
+                全选结果
               </label>
               {selectedIds.length > 0 ? <span>已选 {selectedIds.length} 条</span> : null}
             </div>
@@ -261,17 +189,15 @@ function LogsContent() {
             </div>
           </div>
           <div className="overflow-x-auto">
-            <Table className="min-w-[980px]">
+            <Table className="min-w-[900px]">
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
                   <TableHead>时间</TableHead>
                   <TableHead>类型</TableHead>
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
-                  {isCallLog ? <TableHead>执行账号</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
-                  {isCallLog ? <TableHead>缓存</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
                   <TableHead>简述</TableHead>
                   <TableHead className="w-40">操作</TableHead>
@@ -288,19 +214,11 @@ function LogsContent() {
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
-                      {isCallLog ? <TableCell className="max-w-[160px] truncate">{getDetailText(item, "account_email")}</TableCell> : null}
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
                             {getStatus(item)}
-                          </Badge>
-                        </TableCell>
-                      ) : null}
-                      {isCallLog ? (
-                        <TableCell>
-                          <Badge variant={isCacheHit(item) ? "secondary" : "outline"} className="rounded-md">
-                            {isCacheHit(item) ? "命中" : "否"}
                           </Badge>
                         </TableCell>
                       ) : null}
@@ -346,29 +264,14 @@ function LogsContent() {
               </TableBody>
             </Table>
           </div>
-          <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
-            <div className="flex items-center gap-2">
-              <span>每页</span>
-              <Select value={String(pageSize)} onValueChange={(value) => { const size = Number(value); setPageSize(size); setPage(1); void loadLogs(1, size); }}>
-                <SelectTrigger className="h-8 w-[70px] rounded-lg border-stone-200 bg-white text-xs"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="10">10</SelectItem>
-                  <SelectItem value="20">20</SelectItem>
-                  <SelectItem value="50">50</SelectItem>
-                  <SelectItem value="100">100</SelectItem>
-                </SelectContent>
-              </Select>
-              <span>条</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <span>第 {page} / {Math.max(1, totalPages)} 页，共 {total} 条</span>
-              <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={page <= 1} onClick={() => { setPage((v) => Math.max(1, v - 1)); void loadLogs(page - 1); }}>
-                <ChevronLeft className="size-4" />
-              </Button>
-              <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={page >= totalPages} onClick={() => { setPage((v) => v + 1); void loadLogs(page + 1); }}>
-                <ChevronRight className="size-4" />
-              </Button>
-            </div>
+          <div className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 text-sm text-stone-500">
+            <span>第 {safePage} / {pageCount} 页，共 {items.length} 条</span>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
+              <ChevronLeft className="size-4" />
+            </Button>
+            <Button variant="outline" size="icon" className="size-9 rounded-lg border-stone-200 bg-white" disabled={safePage >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>
+              <ChevronRight className="size-4" />
+            </Button>
           </div>
           {!isLoading && items.length === 0 ? <div className="px-6 py-14 text-center text-sm text-stone-500">没有找到日志</div> : null}
         </CardContent>
@@ -379,16 +282,10 @@ function LogsContent() {
             <DialogTitle>日志详情</DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto px-6 py-5">
-            {isDetailLoading ? (
-              <div className="flex h-full items-center justify-center">
-                <LoaderCircle className="size-5 animate-spin text-stone-400" />
-              </div>
-            ) : (
             <div className="space-y-4">
-              {/* 基础信息 */}
               <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
                 {Object.entries(detailLog?.detail || {})
-                  .filter(([key, value]) => key !== "urls" && key !== "request_urls" && key !== "request_text" && key !== "response_text" && key !== "response_text_truncated" && typeof value !== "object")
+                  .filter(([key, value]) => key !== "urls" && typeof value !== "object")
                   .map(([key, value]) => (
                     <div key={key} className="flex items-start justify-between gap-4">
                       <span className="text-stone-400">{key}</span>
@@ -396,121 +293,32 @@ function LogsContent() {
                     </div>
                   ))}
               </div>
-
-              {/* 请求内容 - 单独展示，支持展开/收起 */}
-              {requestText && (
-                <div className="rounded-xl border border-stone-200 bg-white">
-                  <div className="flex items-center justify-between border-b border-stone-100 px-4 py-3">
-                    <span className="text-sm font-medium text-stone-700">请求内容</span>
-                    <button
-                      type="button"
-                      className="text-xs text-stone-500 hover:text-stone-700"
-                      onClick={() => {
-                        navigator.clipboard.writeText(requestText);
-                        toast.success("已复制到剪贴板");
-                      }}
-                    >
-                      复制
-                    </button>
-                  </div>
-                  <div className="p-4">
-                    <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
-                      {requestText}
-                    </pre>
-                  </div>
-                </div>
-              )}
-
-              {responseText && (
-                <div className="rounded-xl border border-stone-200 bg-white">
-                  <div className="flex items-center justify-between border-b border-stone-100 px-4 py-3">
-                    <span className="text-sm font-medium text-stone-700">响应内容{isResponseTextTruncated ? "（已截断）" : ""}</span>
-                    <button
-                      type="button"
-                      className="text-xs text-stone-500 hover:text-stone-700"
-                      onClick={() => {
-                        navigator.clipboard.writeText(responseText);
-                        toast.success("已复制到剪贴板");
-                      }}
-                    >
-                      复制
-                    </button>
-                  </div>
-                  <div className="p-4">
-                    <pre className="max-h-[260px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
-                      {responseText}
-                    </pre>
-                  </div>
-                </div>
-              )}
-
-              {detailRequestUrls.length ? (
-                <div className="rounded-xl border border-stone-200 bg-white p-4">
-                  <div className="mb-3 text-sm font-medium text-stone-700">入参图片</div>
-                  <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                    {detailRequestUrls.map((url, index) => (
-                      <button
-                        key={url}
-                        type="button"
-                        className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
-                        onClick={() => {
-                          setLightboxIndex(index);
-                          setLightboxOpen(true);
-                        }}
-                      >
-                        <img src={url} alt="" className="h-full w-full object-cover" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
               {detailUrls.length ? (
-                <div className="rounded-xl border border-stone-200 bg-white p-4">
-                  <div className="mb-3 text-sm font-medium text-stone-700">生成图片</div>
-                  <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                    {detailUrls.map((url, index) => (
-                      <button
-                        key={url}
-                        type="button"
-                        className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
-                        onClick={() => {
-                          setLightboxIndex(detailRequestUrls.length + index);
-                          setLightboxOpen(true);
-                        }}
-                      >
-                        <img src={url} alt="" className="h-full w-full object-cover" />
-                      </button>
-                    ))}
-                  </div>
+                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+                  {detailUrls.map((url, index) => (
+                    <button
+                      key={url}
+                      type="button"
+                      className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
+                      onClick={() => {
+                        setLightboxIndex(index);
+                        setLightboxOpen(true);
+                      }}
+                    >
+                      <img src={url} alt="" className="h-full w-full object-cover" />
+                    </button>
+                  ))}
                 </div>
               ) : null}
-
-              {/* 原始 JSON - 可折叠 */}
-              <div className="rounded-xl border border-stone-200 bg-white">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium text-stone-700 hover:bg-stone-50"
-                  onClick={() => setShowRawJson(!showRawJson)}
-                >
-                  <span>原始数据</span>
-                  <ChevronRight className={`size-4 transition-transform ${showRawJson ? "rotate-90" : ""}`} />
-                </button>
-                {showRawJson && (
-                  <div className="border-t border-stone-100 p-4">
-                    <pre className="max-h-[400px] overflow-auto rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
-                      {JSON.stringify(detailLog?.detail || {}, null, 2)}
-                    </pre>
-                  </div>
-                )}
-              </div>
+              <pre className="max-h-[72vh] overflow-auto rounded-xl border border-stone-200 bg-stone-50 p-4 text-xs leading-6 text-stone-700">
+                {JSON.stringify(detailLog?.detail || {}, null, 2)}
+              </pre>
             </div>
-            )}
           </div>
         </DialogContent>
       </Dialog>
       <ImageLightbox
-        images={lightboxImages}
+        images={detailImages}
         currentIndex={lightboxIndex}
         open={lightboxOpen}
         onOpenChange={setLightboxOpen}

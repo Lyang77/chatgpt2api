@@ -22,7 +22,6 @@ export type Account = {
   source_type?: string | null;
   status: AccountStatus;
   quota: number;
-  image_quota_unknown?: boolean;
   email?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{
@@ -171,6 +170,7 @@ export type SettingsConfig = {
   image_parallel_generation?: boolean;
   image_settle_enabled?: boolean;
   image_check_before_hit_enabled?: boolean;
+  image_remove_conversation_after_result?: boolean;
   image_settle_secs?: number | string;
   image_timeout_retry_secs?: number | string;
   auto_remove_invalid_accounts?: boolean;
@@ -187,7 +187,6 @@ export type SettingsConfig = {
 
 export type BackupInclude = {
   config: boolean;
-  register: boolean;
   cpa: boolean;
   sub2api: boolean;
   logs: boolean;
@@ -315,52 +314,6 @@ export type UserKey = {
   enabled: boolean;
   created_at: string | null;
   last_used_at: string | null;
-};
-
-export type OutlookPoolStats = {
-  unused: number;
-  in_use: number;
-  used: number;
-  token_invalid: number;
-  failed: number;
-};
-
-export type RegisterConfig = {
-  enabled: boolean;
-  mail: {
-    request_timeout: number;
-    wait_timeout: number;
-    wait_interval: number;
-    providers: Array<Record<string, unknown>>;
-  };
-  proxy: string;
-  total: number;
-  threads: number;
-  mode: "total" | "quota" | "available";
-  target_quota: number;
-  target_available: number;
-  check_interval: number;
-  stats: {
-    job_id?: string;
-    success: number;
-    fail: number;
-    done: number;
-    running: number;
-    threads: number;
-    elapsed_seconds?: number;
-    avg_seconds?: number;
-    success_rate?: number;
-    current_quota?: number;
-    current_available?: number;
-    started_at?: string;
-    updated_at?: string;
-    finished_at?: string;
-  };
-  logs?: Array<{
-    time: string;
-    text: string;
-    level: string;
-  }>;
 };
 
 export async function login(authKey: string) {
@@ -702,40 +655,12 @@ export async function deleteToTarget(targetFreeMb: number) {
   );
 }
 
-export interface SystemLogPage {
-  items: SystemLog[];
-  total: number;
-  page: number;
-  page_size: number;
-  total_pages: number;
-}
-
-export async function fetchSystemLogs(filters: {
-  type?: string;
-  start_date?: string;
-  end_date?: string;
-  page?: number;
-  page_size?: number;
-  key_name?: string;
-  account_email?: string;
-  status?: string;
-  summary?: string;
-}) {
+export async function fetchSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
   if (filters.start_date) params.set("start_date", filters.start_date);
   if (filters.end_date) params.set("end_date", filters.end_date);
-  if (filters.page && filters.page > 1) params.set("page", String(filters.page));
-  if (filters.page_size && filters.page_size !== 20) params.set("page_size", String(filters.page_size));
-  if (filters.key_name) params.set("key_name", filters.key_name);
-  if (filters.account_email) params.set("account_email", filters.account_email);
-  if (filters.status) params.set("status", filters.status);
-  if (filters.summary) params.set("summary", filters.summary);
-  return httpRequest<SystemLogPage>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
-}
-
-export async function fetchSystemLogDetail(logId: string) {
-  return httpRequest<SystemLog>(`/api/logs/${encodeURIComponent(logId)}`);
+  return httpRequest<{ items: SystemLog[] }>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
 export async function deleteSystemLogs(ids: string[]) {
@@ -766,36 +691,6 @@ export async function updateUserKey(keyId: string, updates: { enabled?: boolean;
 export async function deleteUserKey(keyId: string) {
   return httpRequest<{ items: UserKey[] }>(`/api/auth/users/${keyId}`, {
     method: "DELETE",
-  });
-}
-
-export async function fetchRegisterConfig() {
-  return httpRequest<{ register: RegisterConfig }>("/api/register");
-}
-
-export async function updateRegisterConfig(updates: Partial<RegisterConfig>) {
-  return httpRequest<{ register: RegisterConfig }>("/api/register", {
-    method: "POST",
-    body: updates,
-  });
-}
-
-export async function startRegister() {
-  return httpRequest<{ register: RegisterConfig }>("/api/register/start", { method: "POST" });
-}
-
-export async function stopRegister() {
-  return httpRequest<{ register: RegisterConfig }>("/api/register/stop", { method: "POST" });
-}
-
-export async function resetRegister() {
-  return httpRequest<{ register: RegisterConfig }>("/api/register/reset", { method: "POST" });
-}
-
-export async function resetOutlookPool(scope: "all" | "failed" | "unused" = "all") {
-  return httpRequest<{ register: RegisterConfig }>("/api/register/outlook-pool/reset", {
-    method: "POST",
-    body: { scope },
   });
 }
 

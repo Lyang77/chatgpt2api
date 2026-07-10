@@ -10,7 +10,6 @@ from services.protocol.chat_completion_cache import cache_key, chat_completion_c
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
-    backend_account_email,
     collect_image_outputs,
     collect_text,
     count_message_image_tokens,
@@ -45,13 +44,6 @@ TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
 )
 
 
-def _with_internal_account_email(payload: dict[str, Any], backend: object) -> dict[str, Any]:
-    email = backend_account_email(backend)
-    if not email:
-        return payload
-    return {**payload, "_account_email": email}
-
-
 def normalize_thinking_effort(value: object) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in {"", "none"}:
@@ -64,13 +56,13 @@ def normalize_thinking_effort(value: object) -> str:
 
 
 def thinking_effort_from_body(body: dict[str, Any]) -> str:
-    reasoning = body.get("reasoning")
-    if isinstance(reasoning, dict):
-        return normalize_thinking_effort(reasoning.get("effort"))
     if "thinking_effort" in body:
         return normalize_thinking_effort(body.get("thinking_effort"))
     if "reasoning_effort" in body:
         return normalize_thinking_effort(body.get("reasoning_effort"))
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict):
+        return normalize_thinking_effort(reasoning.get("effort"))
     return ""
 
 
@@ -139,31 +131,12 @@ def stream_text_chat_completion(
     for delta_text in stream_text_deltas(backend, request):
         if not sent_role:
             sent_role = True
-            yield _with_internal_account_email(
-                completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
-                backend,
-            )
+            yield completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created)
         else:
-            yield _with_internal_account_email(
-                completion_chunk(model, {"content": delta_text}, None, completion_id, created),
-                backend,
-            )
+            yield completion_chunk(model, {"content": delta_text}, None, completion_id, created)
     if not sent_role:
-        yield _with_internal_account_email(
-            completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created),
-            backend,
-        )
-    yield _with_internal_account_email(completion_chunk(model, {}, "stop", completion_id, created), backend)
-
-
-def text_chat_completion_response(model: str, messages: list[dict[str, Any]], thinking_effort: str = "") -> dict[str, Any]:
-    backend = text_backend()
-    response = completion_response(
-        model,
-        collect_text(backend, ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
-        messages=messages,
-    )
-    return _with_internal_account_email(response, backend)
+        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
+    yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
 def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
@@ -229,31 +202,24 @@ def web_search_chat_response(messages: list[dict[str, Any]], model: str) -> dict
     query = search_query_from_messages(messages)
     if not query:
         raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
-    result = run_web_search(query)
-    text, annotations = text_with_url_citations(result)
-    response = completion_response(
+    text, annotations = text_with_url_citations(run_web_search(query))
+    return completion_response(
         model,
         text,
         messages=messages,
         annotations=chat_completion_annotations(annotations),
     )
-    email = str(result.get("_account_email") or "").strip()
-    return {**response, "_account_email": email} if email else response
 
 
 def stream_web_search_chat_completion(messages: list[dict[str, Any]], model: str) -> Iterator[dict[str, Any]]:
     query = search_query_from_messages(messages)
     if not query:
         raise HTTPException(status_code=400, detail={"error": "messages or prompt is required for web search"})
-    result = run_web_search(query)
-    text, _annotations = text_with_url_citations(result)
-    email = str(result.get("_account_email") or "").strip()
+    text, _annotations = text_with_url_citations(run_web_search(query))
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
-    first = completion_chunk(model, {"role": "assistant", "content": text}, None, completion_id, created)
-    final = completion_chunk(model, {}, "stop", completion_id, created)
-    yield {**first, "_account_email": email} if email else first
-    yield {**final, "_account_email": email} if email else final
+    yield completion_chunk(model, {"role": "assistant", "content": text}, None, completion_id, created)
+    yield completion_chunk(model, {}, "stop", completion_id, created)
 
 
 def image_result_content(result: dict[str, Any]) -> str:
@@ -342,5 +308,9 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     key = cache_key(body, messages, stream=False)
     return chat_completion_cache.get_or_compute_response(
         key,
-        lambda: text_chat_completion_response(model, messages, thinking_effort),
+        lambda: completion_response(
+            model,
+            collect_text(text_backend(), ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
+            messages=messages,
+        ),
     )

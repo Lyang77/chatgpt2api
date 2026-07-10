@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -302,7 +303,6 @@ class ConversationRequest:
     n: int = 1
     size: str | None = None
     quality: str = "auto"
-    output_format: str = "png"
     response_format: str = "b64_json"
     base_url: str | None = None
     message_as_error: bool = False
@@ -679,26 +679,6 @@ def text_backend() -> OpenAIBackendAPI:
     return OpenAIBackendAPI(access_token=account_service.get_text_access_token())
 
 
-def backend_account_email(backend: object) -> str:
-    return str(getattr(backend, "_account_email", "") or getattr(backend, "account_email", "") or "").strip()
-
-
-def remember_backend_account_email(backend: object, access_token: str) -> str:
-    account = account_service.get_account(access_token) or {}
-    email = str(account.get("email") or "").strip()
-    if email:
-        setattr(backend, "_account_email", email)
-    return email
-
-
-def attach_backend_account_email_to_error(exc: Exception, backend: object) -> None:
-    if getattr(exc, "account_email", ""):
-        return
-    email = backend_account_email(backend)
-    if email:
-        setattr(exc, "account_email", email)
-
-
 def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) -> Iterator[str]:
     attempted_tokens: set[str] = set()
     token = getattr(backend, "access_token", "")
@@ -708,8 +688,8 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
             raise RuntimeError("no available text account")
         if token:
             attempted_tokens.add(token)
+        active_backend = None
         try:
-            remember_backend_account_email(backend, token)
             active_backend = OpenAIBackendAPI(access_token=token)
             for event in conversation_events(
                 active_backend,
@@ -737,8 +717,10 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
                     token = account_service.get_text_access_token(attempted_tokens)
                 if token:
                     continue
-            attach_backend_account_email_to_error(exc, backend)
             raise
+        finally:
+            if active_backend is not None:
+                active_backend.close()
 
 
 def collect_text(backend: OpenAIBackendAPI, request: ConversationRequest) -> str:
@@ -792,6 +774,24 @@ def _get_detailed_error_from_tasks(
             "error": str(exc),
         })
         return ""
+
+
+def _remove_image_conversation_later(backend: OpenAIBackendAPI, conversation_id: str) -> None:
+    if not config.image_remove_conversation_after_result or not conversation_id:
+        return
+
+    def _run() -> None:
+        try:
+            backend.delete_conversation(conversation_id)
+            logger.info({"event": "image_conversation_removed", "conversation_id": conversation_id})
+        except Exception as exc:
+            logger.warning({
+                "event": "image_conversation_remove_failed",
+                "conversation_id": conversation_id,
+                "error": str(exc),
+            })
+
+    threading.Thread(target=_run, name=f"remove-image-conversation-{conversation_id}", daemon=True).start()
 
 
 def stream_image_outputs(
@@ -970,6 +970,7 @@ def stream_image_outputs(
             int(time.time()),
         )["data"]
         if data:
+            _remove_image_conversation_later(backend, conversation_id)
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
         return
 
@@ -1067,6 +1068,7 @@ def stream_image_outputs(
                         int(time.time()),
                     )["data"]
                     if data:
+                        _remove_image_conversation_later(backend, conversation_id)
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
                         return
         elif is_text_reply:
@@ -1179,6 +1181,7 @@ def stream_image_outputs(
                     int(time.time()),
                 )["data"]
                 if data:
+                    _remove_image_conversation_later(backend, conversation_id)
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
                     return
         
@@ -1228,7 +1231,6 @@ def stream_codex_image_outputs(
         images=request.images or [],
         size=request.size,
         quality=request.quality,
-        output_format=request.output_format,
     )))
     if not images:
         raise ImageGenerationError("No image result found in response")
@@ -1296,6 +1298,7 @@ def _generate_single_image(
             "account_found": bool(account),
             "index": index,
         })
+        backend = None
         try:
             backend = OpenAIBackendAPI(access_token=token)
             if request.progress_callback:
@@ -1469,6 +1472,9 @@ def _generate_single_image(
                     time.sleep(wait_secs)
                     continue
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
+        finally:
+            if backend is not None:
+                backend.close()
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:

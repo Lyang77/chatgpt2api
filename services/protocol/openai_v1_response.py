@@ -10,7 +10,6 @@ from services.protocol.chat_completion_cache import cache_key, chat_completion_c
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
-    backend_account_email,
     count_message_image_tokens,
     count_message_text_tokens,
     count_text_tokens,
@@ -44,21 +43,6 @@ TOOL_UNAVAILABLE_SYSTEM_MESSAGE = (
 )
 
 RESPONSE_CONTENT_PART_TYPES = {"text", "input_text", "output_text", "image_url", "input_image", "image"}
-
-
-def _with_internal_account_email(event: dict[str, Any], backend: object) -> dict[str, Any]:
-    return _with_internal_account_email_value(event, backend_account_email(backend))
-
-
-def _with_internal_account_email_value(event: dict[str, Any], email: str) -> dict[str, Any]:
-    email = str(email or "").strip()
-    if not email:
-        return event
-    event = {**event, "_account_email": email}
-    response = event.get("response")
-    if isinstance(response, dict):
-        event["response"] = {**response, "_account_email": email}
-    return event
 
 
 def normalize_thinking_effort(value: object) -> str:
@@ -325,22 +309,16 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
     request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
     for delta in stream_text_deltas(backend, request):
         full_text += delta
-        yield _with_internal_account_email(
-            {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta},
-            backend,
-        )
-    yield _with_internal_account_email(
-        {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text},
-        backend,
-    )
+        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 0, "content_index": 0, "delta": delta}
+    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 0, "content_index": 0, "text": full_text}
     item = text_output_item(full_text, item_id, "completed")
-    yield _with_internal_account_email({"type": "response.output_item.done", "output_index": 0, "item": item}, backend)
+    yield {"type": "response.output_item.done", "output_index": 0, "item": item}
     usage = token_usage(
         input_text_tokens=count_message_text_tokens(messages, model),
         input_image_tokens=count_message_image_tokens(messages, model),
         output_text_tokens=count_text_tokens(full_text, model),
     )
-    yield _with_internal_account_email(response_completed(response_id, model, created, [item], usage), backend)
+    yield response_completed(response_id, model, created, [item], usage)
 
 
 def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
@@ -361,25 +339,24 @@ def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, An
     yield {"type": "response.web_search_call.in_progress", "output_index": 0, "item_id": search_id}
     yield {"type": "response.web_search_call.searching", "output_index": 0, "item_id": search_id}
     result = run_web_search(query)
-    account_email = str(result.get("_account_email") or "").strip()
     search_item = web_search_call_item(query, search_id, "completed", normalized_sources(result))
-    yield _with_internal_account_email_value({"type": "response.web_search_call.completed", "output_index": 0, "item_id": search_id}, account_email)
-    yield _with_internal_account_email_value({"type": "response.output_item.done", "output_index": 0, "item": search_item}, account_email)
+    yield {"type": "response.web_search_call.completed", "output_index": 0, "item_id": search_id}
+    yield {"type": "response.output_item.done", "output_index": 0, "item": search_item}
 
     text, annotations = text_with_url_citations(result)
     message_item = text_output_item("", item_id, "in_progress", annotations)
-    yield _with_internal_account_email_value({"type": "response.output_item.added", "output_index": 1, "item": message_item}, account_email)
+    yield {"type": "response.output_item.added", "output_index": 1, "item": message_item}
     if text:
-        yield _with_internal_account_email_value({"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": text}, account_email)
-    yield _with_internal_account_email_value({"type": "response.output_text.done", "item_id": item_id, "output_index": 1, "content_index": 0, "text": text}, account_email)
+        yield {"type": "response.output_text.delta", "item_id": item_id, "output_index": 1, "content_index": 0, "delta": text}
+    yield {"type": "response.output_text.done", "item_id": item_id, "output_index": 1, "content_index": 0, "text": text}
     message_item = text_output_item(text, item_id, "completed", annotations)
-    yield _with_internal_account_email_value({"type": "response.output_item.done", "output_index": 1, "item": message_item}, account_email)
+    yield {"type": "response.output_item.done", "output_index": 1, "item": message_item}
     usage = token_usage(
         input_text_tokens=count_message_text_tokens(messages, model),
         input_image_tokens=count_message_image_tokens(messages, model),
         output_text_tokens=count_text_tokens(text, model),
     )
-    yield _with_internal_account_email_value(response_completed(response_id, model, created, [search_item, message_item], usage), account_email)
+    yield response_completed(response_id, model, created, [search_item, message_item], usage)
 
 
 def stream_image_response(
@@ -425,22 +402,11 @@ def stream_image_response(
 
 def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     completed = {}
-    cache_hit = False
-    account_email = ""
     for event in events:
-        cache_hit = cache_hit or event.get("_cache_hit") is True
-        if not account_email:
-            account_email = str(event.get("_account_email") or "").strip()
         if event.get("type") == "response.completed":
             completed = event.get("response") if isinstance(event.get("response"), dict) else {}
-            if not account_email:
-                account_email = str(completed.get("_account_email") or "").strip()
     if not completed:
         raise RuntimeError("response generation failed")
-    if cache_hit:
-        completed = {**completed, "_cache_hit": True}
-    if account_email:
-        completed = {**completed, "_account_email": account_email}
     return completed
 
 

@@ -123,19 +123,6 @@ class ChatCompletionCache:
     def _copy(value: Any) -> Any:
         return copy.deepcopy(value)
 
-    @classmethod
-    def _cache_hit_copy(cls, value: Any) -> Any:
-        copied = cls._copy(value)
-        if isinstance(copied, dict):
-            copied["_cache_hit"] = True
-            return copied
-        if isinstance(copied, list):
-            return [
-                {**item, "_cache_hit": True} if isinstance(item, dict) else item
-                for item in copied
-            ]
-        return copied
-
     def get_or_compute_response(self, key: str, compute: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         settings = self._settings()
         if not settings.get("enabled") or int(settings.get("ttl_seconds") or 0) <= 0:
@@ -147,7 +134,7 @@ class ChatCompletionCache:
             self._prune_locked(now, max_entries)
             entry = self._entries.get(key)
             if entry and entry.expires_at > now:
-                return self._cache_hit_copy(entry.value)
+                return self._copy(entry.value)
             inflight = self._inflight.get(key) if settings.get("dedupe_inflight") else None
             if inflight is None:
                 inflight = InflightCall()
@@ -203,7 +190,7 @@ class ChatCompletionCache:
             self._prune_locked(now, max_entries)
             entry = self._entries.get(key)
             if entry and entry.expires_at > now:
-                yield from self._cache_hit_copy(entry.value)
+                yield from self._copy(entry.value)
                 return
             inflight = self._inflight.get(key) if settings.get("dedupe_inflight") else None
             if inflight is None:
