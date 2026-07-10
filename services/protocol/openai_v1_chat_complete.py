@@ -118,6 +118,12 @@ def completion_response(
     }
 
 
+def _with_account_email(payload: dict[str, Any], account_email: str) -> dict[str, Any]:
+    if account_email:
+        payload["_account_email"] = account_email
+    return payload
+
+
 def stream_text_chat_completion(
     backend,
     messages: list[dict[str, Any]],
@@ -131,12 +137,34 @@ def stream_text_chat_completion(
     for delta_text in stream_text_deltas(backend, request):
         if not sent_role:
             sent_role = True
-            yield completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created)
+            yield _with_account_email(
+                completion_chunk(model, {"role": "assistant", "content": delta_text}, None, completion_id, created),
+                request.account_email,
+            )
         else:
-            yield completion_chunk(model, {"content": delta_text}, None, completion_id, created)
+            yield _with_account_email(
+                completion_chunk(model, {"content": delta_text}, None, completion_id, created),
+                request.account_email,
+            )
     if not sent_role:
-        yield completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created)
-    yield completion_chunk(model, {}, "stop", completion_id, created)
+        yield _with_account_email(
+            completion_chunk(model, {"role": "assistant", "content": ""}, None, completion_id, created),
+            request.account_email,
+        )
+    yield _with_account_email(completion_chunk(model, {}, "stop", completion_id, created), request.account_email)
+
+
+def text_chat_response(
+    backend,
+    model: str,
+    messages: list[dict[str, Any]],
+    thinking_effort: str,
+) -> dict[str, Any]:
+    request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
+    return _with_account_email(
+        completion_response(model, collect_text(backend, request), messages=messages),
+        request.account_email,
+    )
 
 
 def collect_chat_content(chunks: Iterable[dict[str, Any]]) -> str:
@@ -308,9 +336,5 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     key = cache_key(body, messages, stream=False)
     return chat_completion_cache.get_or_compute_response(
         key,
-        lambda: completion_response(
-            model,
-            collect_text(text_backend(model), ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)),
-            messages=messages,
-        ),
+        lambda: text_chat_response(text_backend(model), model, messages, thinking_effort),
     )

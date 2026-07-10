@@ -82,6 +82,18 @@ class LoggedCallResponseTextTests(unittest.TestCase):
         self.assertEqual(emitted, chunks)
         self.assertEqual(self._last_detail().get("response_text"), "hello from stream")
 
+    def test_stream_log_records_execution_account_without_exposing_internal_field(self) -> None:
+        call = LoggedCall(IDENTITY, "/v1/chat/completions", "gpt-5-5", "文本生成", request_text="say hello")
+        chunks = [{
+            "_account_email": "executor@example.test",
+            "choices": [{"delta": {"content": "hello"}, "finish_reason": "stop"}],
+        }]
+
+        emitted = list(call.stream(iter(chunks)))
+
+        self.assertNotIn("_account_email", emitted[0])
+        self.assertEqual(self._last_detail().get("account_email"), "executor@example.test")
+
     def test_log_list_omits_response_text_but_detail_keeps_it(self) -> None:
         call = LoggedCall(
             IDENTITY,

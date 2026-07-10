@@ -308,6 +308,7 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    account_email: str = ""
 
 
 @dataclass
@@ -692,6 +693,8 @@ def stream_text_deltas(backend: OpenAIBackendAPI, request: ConversationRequest) 
         active_backend = None
         try:
             active_backend = OpenAIBackendAPI(access_token=token)
+            account = account_service.get_account(token) or {}
+            request.account_email = str(account.get("email") or "").strip()
             for event in conversation_events(
                 active_backend,
                 messages=request.messages,

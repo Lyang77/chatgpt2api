@@ -15,6 +15,9 @@ class _FakeBackend:
     def __init__(self, access_token: str = "") -> None:
         self.access_token = access_token
 
+    def close(self) -> None:
+        return None
+
 
 class ModelAccountRoutingTests(unittest.TestCase):
     def test_text_backend_selects_account_for_requested_model(self) -> None:
@@ -28,9 +31,13 @@ class ModelAccountRoutingTests(unittest.TestCase):
         self.assertEqual(backend.access_token, "token-a")
 
     def test_chat_completion_passes_requested_model_to_account_selection(self) -> None:
+        def collect_selected_account(_backend, request):
+            request.account_email = "executor@example.test"
+            return "ok"
+
         with (
             mock.patch.object(chat_completion_module, "text_backend", return_value=_FakeBackend()) as select,
-            mock.patch.object(chat_completion_module, "collect_text", return_value="ok"),
+            mock.patch.object(chat_completion_module, "collect_text", side_effect=collect_selected_account),
             mock.patch.object(
                 chat_completion_module.chat_completion_cache,
                 "get_or_compute_response",
@@ -44,6 +51,43 @@ class ModelAccountRoutingTests(unittest.TestCase):
 
         select.assert_called_once_with("gpt-5-5")
         self.assertEqual(response["model"], "gpt-5-5")
+        self.assertEqual(response["_account_email"], "executor@example.test")
+
+    def test_stream_chat_completion_preserves_selected_account_for_logs(self) -> None:
+        def stream_selected_account(_backend, request):
+            request.account_email = "executor@example.test"
+            yield "ok"
+
+        with mock.patch.object(chat_completion_module, "stream_text_deltas", side_effect=stream_selected_account):
+            chunks = list(chat_completion_module.stream_text_chat_completion(
+                _FakeBackend(),
+                [{"role": "user", "content": "hello"}],
+                "gpt-5-5",
+            ))
+
+        self.assertEqual(chunks[0]["_account_email"], "executor@example.test")
+        self.assertEqual(chunks[-1]["_account_email"], "executor@example.test")
+
+    def test_text_stream_reads_selected_account_email(self) -> None:
+        request = ConversationRequest(model="gpt-5-5", messages=[{"role": "user", "content": "hello"}])
+        with (
+            mock.patch.object(conversation_module, "OpenAIBackendAPI", _FakeBackend),
+            mock.patch.object(
+                conversation_module,
+                "conversation_events",
+                return_value=iter([{"type": "conversation.delta", "delta": "ok"}]),
+            ),
+            mock.patch.object(
+                conversation_module.account_service,
+                "get_account",
+                return_value={"email": "executor@example.test"},
+            ),
+            mock.patch.object(conversation_module.account_service, "mark_text_used"),
+        ):
+            result = list(conversation_module.stream_text_deltas(_FakeBackend("token-a"), request))
+
+        self.assertEqual(result, ["ok"])
+        self.assertEqual(request.account_email, "executor@example.test")
 
     def test_image_pool_selection_receives_requested_model(self) -> None:
         with mock.patch.object(

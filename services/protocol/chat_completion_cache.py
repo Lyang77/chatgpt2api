@@ -30,6 +30,9 @@ CACHEABLE_TEXT_KEYS = {
     "reasoning",
 }
 
+# These fields are request-specific diagnostics for log_service, never cacheable response data.
+INTERNAL_RESPONSE_KEYS = {"_account_email", "_conversation_id", "_cache_hit"}
+
 
 @dataclass
 class CacheEntry:
@@ -123,6 +126,20 @@ class ChatCompletionCache:
     def _copy(value: Any) -> Any:
         return copy.deepcopy(value)
 
+    @classmethod
+    def _copy_for_cache(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: cls._copy_for_cache(item)
+                for key, item in value.items()
+                if key not in INTERNAL_RESPONSE_KEYS
+            }
+        if isinstance(value, list):
+            return [cls._copy_for_cache(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._copy_for_cache(item) for item in value)
+        return cls._copy(value)
+
     def get_or_compute_response(self, key: str, compute: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         settings = self._settings()
         if not settings.get("enabled") or int(settings.get("ttl_seconds") or 0) <= 0:
@@ -164,12 +181,13 @@ class ChatCompletionCache:
             raise
 
         expires_at = time.time() + int(settings.get("ttl_seconds") or 0)
+        cached_value = self._copy_for_cache(value)
         with self._lock:
-            self._entries[key] = CacheEntry(expires_at=expires_at, value=self._copy(value))
+            self._entries[key] = CacheEntry(expires_at=expires_at, value=cached_value)
             self._prune_locked(time.time(), max_entries)
             self._inflight.pop(key, None)
         with inflight.condition:
-            inflight.value = self._copy(value)
+            inflight.value = self._copy(cached_value)
             inflight.done = True
             inflight.condition.notify_all()
         return value
@@ -213,7 +231,7 @@ class ChatCompletionCache:
         chunks: list[dict[str, Any]] = []
         try:
             for chunk in compute():
-                chunks.append(self._copy(chunk))
+                chunks.append(self._copy_for_cache(chunk))
                 yield chunk
         except BaseException as exc:
             with self._lock:
