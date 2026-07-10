@@ -46,6 +46,7 @@ import {
 } from "@/components/ui/select";
 import {
   deleteAccounts,
+  fetchAccountInflight,
   fetchAccounts,
   fetchModels,
   fetchRefreshProgress,
@@ -59,6 +60,7 @@ import {
   type AccountStatus,
   type Model,
   type RefreshProgressResponse,
+  type SystemLog,
 } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
@@ -204,6 +206,28 @@ function AccountsPageContent() {
   });
   const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [refreshSummary, setRefreshSummary] = useState<Record<string, number | string> | null>(null);
+  const [inflightAccount, setInflightAccount] = useState<Account | null>(null);
+  const [inflightLogs, setInflightLogs] = useState<SystemLog[]>([]);
+  const [isLoadingInflight, setIsLoadingInflight] = useState(false);
+
+  const loadInflightLogs = async (account: Account) => {
+    setIsLoadingInflight(true);
+    try {
+      const data = await fetchAccountInflight(account.access_token);
+      setInflightLogs(data.items);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "加载在途任务失败");
+    } finally {
+      setIsLoadingInflight(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!inflightAccount) return;
+    void loadInflightLogs(inflightAccount);
+    const timer = window.setInterval(() => void loadInflightLogs(inflightAccount), 2000);
+    return () => window.clearInterval(timer);
+  }, [inflightAccount?.access_token]);
 
   const loadAccounts = async (silent = false) => {
     if (!silent) {
@@ -1255,10 +1279,12 @@ function AccountsPageContent() {
                           {(() => {
                             const inflight = account.image_inflight ?? 0;
                             return (
-                              <span
+                              <button
+                                type="button"
+                                disabled={inflight <= 0}
                                 className={
                                   inflight > 0
-                                    ? "font-semibold text-amber-600"
+                                    ? "font-semibold text-amber-600 hover:underline"
                                     : "text-stone-400"
                                 }
                                 title={
@@ -1266,9 +1292,11 @@ function AccountsPageContent() {
                                     ? "当前正在生成的图片数。号池空闲时此值持续 > 0，说明并发槽位泄漏、该账号已被静默排除出调度"
                                     : "当前无在途生图任务"
                                 }
+                                aria-label={inflight > 0 ? `查看 ${inflight} 个在途任务` : "当前无在途任务"}
+                                onClick={() => setInflightAccount(account)}
                               >
                                 {inflight}
-                              </span>
+                              </button>
                             );
                           })()}
                         </td>
@@ -1393,6 +1421,26 @@ function AccountsPageContent() {
           </CardContent>
         </Card>
       </section>
+      <Dialog open={Boolean(inflightAccount)} onOpenChange={(open) => { if (!open) { setInflightAccount(null); setInflightLogs([]); } }}>
+        <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto rounded-2xl">
+          <DialogHeader>
+            <DialogTitle>在途图片任务</DialogTitle>
+            <DialogDescription>{inflightAccount?.email || "当前账号"} 正在处理的图片子任务（每 2 秒刷新）。</DialogDescription>
+          </DialogHeader>
+          {isLoadingInflight && inflightLogs.length === 0 ? <div className="py-8 text-center text-sm text-stone-400">加载中...</div> : null}
+          {!isLoadingInflight && inflightLogs.length === 0 ? <div className="py-8 text-center text-sm text-stone-400">当前无在途生图任务</div> : null}
+          <div className="space-y-3">
+            {inflightLogs.map((item) => {
+              const detail = item.detail || {};
+              return <div key={item.id} className="rounded-xl border border-stone-200 p-4 text-sm">
+                <div className="flex flex-wrap gap-x-4 gap-y-1 text-stone-500"><span>{String(detail.model || "-")}</span><span>第 {String(detail.image_index || "-")} / {String(detail.image_total || "-")} 张</span><span>{String(detail.stage || "getting_account")}</span><span>重试 {String(detail.retry_count || 0)} 次</span></div>
+                <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-stone-50 p-3 text-xs text-stone-700">{String(detail.request_text || "-")}</pre>
+                {Array.isArray(detail.request_urls) && detail.request_urls.length > 0 ? <div className="mt-3 flex flex-wrap gap-2">{detail.request_urls.filter((url): url is string => typeof url === "string").map((url) => <img key={url} src={url} alt="请求图片" className="size-16 rounded-md border border-stone-200 object-cover" />)}</div> : null}
+              </div>;
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

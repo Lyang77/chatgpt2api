@@ -4,6 +4,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from uuid import uuid4
 
 from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
@@ -78,6 +79,27 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
         raise
 
 
+def attach_image_task_log_template(
+        payload: dict[str, object],
+        identity: dict[str, object],
+        *,
+        endpoint: str,
+        model: str,
+        prompt: str,
+        request_urls: list[str] | None = None,
+) -> None:
+    payload["image_task_log_template"] = {
+        "key_id": identity.get("id"),
+        "key_name": identity.get("name"),
+        "role": identity.get("role"),
+        "endpoint": endpoint,
+        "model": model,
+        "request_text": prompt,
+        "request_urls": list(request_urls or []),
+    }
+    payload["image_task_batch_id"] = uuid4().hex
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -98,6 +120,13 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         image_base_url = resolve_image_base_url(request)
+        attach_image_task_log_template(
+            payload,
+            identity,
+            endpoint="/v1/images/generations",
+            model=body.model,
+            prompt=body.prompt,
+        )
         payload["base_url"] = image_base_url
         call = LoggedCall(
             identity,
@@ -106,6 +135,7 @@ def create_router() -> APIRouter:
             "文生图",
             request_text=body.prompt,
             image_base_url=image_base_url,
+            skip_final_log=True,
         )
         await filter_or_log(call, body.prompt)
         return await call.run(openai_v1_image_generations.handle, payload)
@@ -137,7 +167,16 @@ def create_router() -> APIRouter:
             payload["mask"] = mask
             request_urls.extend(collect_request_image_input_urls(mask, image_base_url))
         call.request_urls = list(dict.fromkeys(url for url in request_urls if url))
+        attach_image_task_log_template(
+            payload,
+            identity,
+            endpoint="/v1/images/edits",
+            model=model,
+            prompt=prompt,
+            request_urls=call.request_urls,
+        )
         payload["base_url"] = image_base_url
+        call.skip_final_log = True
         return await call.run(openai_v1_image_edit.handle, payload)
 
     @router.post("/v1/chat/completions")

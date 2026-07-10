@@ -147,6 +147,65 @@ class SQLiteLogStore:
         finally:
             connection.close()
 
+    def update(self, log_id: str, item: dict[str, Any]) -> dict[str, Any] | None:
+        normalized = self._normalize_item(item)
+        target_id = str(log_id or "").strip()
+        if not target_id:
+            return None
+        detail = normalized["detail"]
+        connection = self._connect()
+        try:
+            with connection:
+                cursor = connection.execute(
+                    """
+                    UPDATE system_log
+                    SET log_time = ?, log_type = ?, summary = ?, key_name = ?,
+                        account_email = ?, status = ?, detail_json = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized["time"],
+                        normalized["type"],
+                        normalized["summary"],
+                        str(detail.get("key_name") or ""),
+                        str(detail.get("account_email") or ""),
+                        str(detail.get("status") or ""),
+                        json.dumps(detail, ensure_ascii=False, separators=(",", ":")),
+                        target_id,
+                    ),
+                )
+                if not cursor.rowcount:
+                    return None
+        finally:
+            connection.close()
+        return self.get_by_id(target_id)
+
+    def list_running_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
+        clauses = ["log_type = ?", "status = ?"]
+        params: list[object] = ["call", "running"]
+        email = str(account_email or "").strip()
+        if email:
+            clauses.append("account_email = ?")
+            params.append(email)
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT id, log_time, log_type, summary, detail_json
+                FROM system_log
+                WHERE {' AND '.join(clauses)}
+                ORDER BY log_time DESC, sequence DESC
+                """,
+                params,
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            item
+            for row in rows
+            if str((item := self._from_row(row)).get("detail", {}).get("endpoint") or "").startswith("/v1/images/")
+        ]
+
     def list(
         self,
         *,
@@ -159,6 +218,9 @@ class SQLiteLogStore:
         account_email: str = "",
         status: str = "",
         summary: str = "",
+        model: str = "",
+        endpoint: str = "",
+        batch_id: str = "",
     ) -> dict[str, Any]:
         clauses: list[str] = []
         params: list[object] = []
@@ -178,6 +240,10 @@ class SQLiteLogStore:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        for key, value in (("model", model), ("endpoint", endpoint), ("batch_id", batch_id)):
+            if value:
+                clauses.append("detail_json LIKE ?")
+                params.append(f'%"{key}":{json.dumps(value, ensure_ascii=False)}%')
 
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         connection = self._connect()

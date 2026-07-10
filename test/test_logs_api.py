@@ -30,6 +30,10 @@ class _FakeLogService:
         self.delete_ids = ids
         return {"removed": len(ids)}
 
+    def request_stop(self, log_id: str) -> tuple[bool, dict[str, object] | None]:
+        self.stop_id = log_id
+        return True, {"id": log_id, "detail": {"status": "running", "stop_requested_at": "2026-07-10 12:00:00"}}
+
 
 class LogsApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -76,6 +80,9 @@ class LogsApiTests(unittest.TestCase):
                 "account_email": "",
                 "status": "success",
                 "summary": "",
+                "model": "",
+                "endpoint": "",
+                "batch_id": "",
             },
         )
         self.assertEqual(self.log_service.detail_id, "log-1")
@@ -85,6 +92,14 @@ class LogsApiTests(unittest.TestCase):
             self.log_service.get_by_id,
             self.log_service.delete,
         ])
+
+    def test_stop_running_log_uses_threadpool(self) -> None:
+        response = self.client.post("/api/logs/log-running/stop", headers=AUTH_HEADERS)
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["stopped"], True)
+        self.assertEqual(self.log_service.stop_id, "log-running")
+        self.assertEqual(self.calls[-1][0], self.log_service.request_stop)
 
 
 if __name__ == "__main__":

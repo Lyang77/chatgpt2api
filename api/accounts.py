@@ -26,6 +26,7 @@ from api.support import (
 from services.account_service import account_service
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
+from services.log_service import log_service
 from services.sub2api_service import (
     list_remote_accounts as sub2api_list_remote_accounts,
     list_remote_groups as sub2api_list_remote_groups,
@@ -212,6 +213,15 @@ def create_router() -> APIRouter:
     async def get_accounts(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"items": account_service.list_accounts()}
+
+    @router.get("/api/accounts/inflight")
+    async def get_account_inflight(access_token: str = "", authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        account = account_service.get_account(access_token.strip())
+        if account is None:
+            raise HTTPException(status_code=404, detail={"error": "account not found"})
+        email = str(account.get("email") or "").strip()
+        return {"items": log_service.list_running_image_subtasks(email)}
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):

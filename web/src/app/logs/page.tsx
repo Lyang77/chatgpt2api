@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, stopSystemLog, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { extractLogResultContent } from "@/lib/log-detail-content";
 
@@ -90,6 +90,8 @@ function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
+  if (status === "running") return "进行中";
+  if (status === "stopped") return "已停止";
   return "-";
 }
 
@@ -102,6 +104,10 @@ function LogsContent() {
   const [accountEmail, setAccountEmail] = useState("");
   const [status, setStatus] = useState("");
   const [summary, setSummary] = useState("");
+  const [model, setModel] = useState("");
+  const [endpoint, setEndpoint] = useState("");
+  const [batchId, setBatchId] = useState("");
+  const [stoppingId, setStoppingId] = useState("");
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
@@ -142,6 +148,9 @@ function LogsContent() {
         account_email: accountEmail,
         status,
         summary,
+        model,
+        endpoint,
+        batch_id: batchId,
       });
       setItems(data.items);
       setTotal(data.total);
@@ -161,6 +170,23 @@ function LogsContent() {
     setAccountEmail("");
     setStatus("");
     setSummary("");
+    setModel("");
+    setEndpoint("");
+    setBatchId("");
+  };
+
+  const handleStop = async (item: SystemLog) => {
+    if (!window.confirm("停止该图片子任务？本地将不再等待或交付后续结果。")) return;
+    setStoppingId(item.id);
+    try {
+      await stopSystemLog(item.id);
+      toast.success("已请求停止任务");
+      await loadLogs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "停止任务失败");
+    } finally {
+      setStoppingId("");
+    }
   };
 
   const openDetail = async (item: SystemLog) => {
@@ -257,8 +283,13 @@ function LogsContent() {
               <SelectItem value="all">全部</SelectItem>
               <SelectItem value="success">成功</SelectItem>
               <SelectItem value="failed">失败</SelectItem>
+              <SelectItem value="running">进行中</SelectItem>
+              <SelectItem value="stopped">已停止</SelectItem>
             </SelectContent>
           </Select>
+          <input type="text" placeholder="模型" value={model} onChange={(e) => setModel(e.target.value)} className="h-10 w-[140px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400" />
+          <input type="text" placeholder="接口" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} className="h-10 w-[170px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400" />
+          <input type="text" placeholder="批次 ID" value={batchId} onChange={(e) => setBatchId(e.target.value)} className="h-10 w-[150px] rounded-xl border border-stone-200 bg-white px-3 text-sm outline-none focus:border-stone-400" />
           <input
             type="text"
             placeholder="简述"
@@ -332,7 +363,7 @@ function LogsContent() {
                       {isCallLog ? <TableCell>{formatDuration(item)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
-                          <Badge variant={item.detail?.status === "failed" ? "danger" : "success"} className="rounded-md">
+                          <Badge variant={item.detail?.status === "failed" ? "danger" : item.detail?.status === "running" ? "warning" : item.detail?.status === "stopped" ? "secondary" : "success"} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
                         </TableCell>
@@ -368,6 +399,11 @@ function LogsContent() {
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
                             查看详情
                           </Button>
+                          {item.detail?.status === "running" && String(item.detail?.endpoint || "").startsWith("/v1/images/") ? (
+                            <Button variant="ghost" className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50" onClick={() => void handleStop(item)} disabled={stoppingId === item.id}>
+                              停止
+                            </Button>
+                          ) : null}
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeletingItems([item])}>
                             删除
                           </Button>

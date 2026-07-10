@@ -61,6 +61,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     response_format = str(body.get("response_format") or "b64_json")
     base_url = str(body.get("base_url") or "") or None
     progress_callback = body.get("progress_callback")
+    image_task_log_template = body.get("image_task_log_template")
+    image_task_batch_id = str(body.get("image_task_batch_id") or "")
     encoded_images = encode_images(images)
     if not encoded_images:
         raise ImageGenerationError("image is required")
@@ -76,6 +78,8 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         images=encoded_images,
         message_as_error=True,
         progress_callback=progress_callback,
+        image_task_log_template=dict(image_task_log_template) if isinstance(image_task_log_template, dict) else None,
+        image_task_batch_id=image_task_batch_id,
     ))
     if body.get("stream"):
         return stream_image_chunks(outputs)

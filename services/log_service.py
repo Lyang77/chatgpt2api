@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from threading import Event, Lock
 from typing import Any
 from uuid import uuid4
 
@@ -61,6 +62,44 @@ REQUEST_IMAGE_BASE64_KEYS = {
 MARKDOWN_IMAGE_DATA_URL_RE = re.compile(r"!\[[^\]]*\]\((data:image/[^)\s]+)\)", re.IGNORECASE)
 
 
+class ImageTaskRegistry:
+    """Coordinates cooperative local cancellation for currently running image tasks."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._events: dict[str, Event] = {}
+
+    def register(self, log_id: str) -> Event:
+        event = Event()
+        with self._lock:
+            self._events[log_id] = event
+        return event
+
+    def unregister(self, log_id: str) -> None:
+        with self._lock:
+            self._events.pop(log_id, None)
+
+    def request_stop(self, log_id: str) -> bool:
+        with self._lock:
+            event = self._events.get(log_id)
+        if event is None:
+            return False
+        event.set()
+        return True
+
+
+image_task_registry = ImageTaskRegistry()
+
+
+@dataclass
+class ImageTaskLogContext:
+    log_id: str
+    batch_id: str
+    image_index: int
+    image_total: int
+    cancel_event: Event
+
+
 class LogService:
     def __init__(self, path: Path):
         self.path = path
@@ -77,6 +116,79 @@ class LogService:
         }
         self.store.append(item)
 
+    def create_call(self, detail: dict[str, Any], summary: str) -> dict[str, Any]:
+        now = datetime.now()
+        next_detail = dict(detail)
+        next_detail.setdefault("started_at", now.strftime("%Y-%m-%d %H:%M:%S"))
+        next_detail.setdefault("status", "running")
+        item = {
+            "id": uuid4().hex,
+            "time": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "type": LOG_TYPE_CALL,
+            "summary": summary,
+            "detail": next_detail,
+        }
+        self.store.append(item)
+        return item
+
+    def update_call(
+        self,
+        log_id: str,
+        *,
+        summary: str | None = None,
+        detail_patch: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.store.get_by_id(log_id)
+        if current is None or current.get("type") != LOG_TYPE_CALL:
+            return None
+        detail = dict(current.get("detail") or {})
+        detail.update(detail_patch or {})
+        now = datetime.now()
+        status = str(detail.get("status") or "")
+        if status in {"success", "failed", "stopped"}:
+            detail["ended_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+        started_at = str(detail.get("started_at") or "")
+        try:
+            started = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
+            detail["duration_ms"] = max(0, int((now - started).total_seconds() * 1000))
+        except ValueError:
+            pass
+        return self.store.update(
+            log_id,
+            {
+                "id": current["id"],
+                "time": current["time"],
+                "type": current["type"],
+                "summary": summary if summary is not None else current.get("summary", ""),
+                "detail": detail,
+            },
+        )
+
+    def list_running_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
+        return self.store.list_running_image_subtasks(account_email)
+
+    def request_stop(
+        self,
+        log_id: str,
+        registry: ImageTaskRegistry | None = None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        current = self.get_by_id(log_id)
+        if current is None:
+            return False, None
+        detail = current.get("detail") or {}
+        if current.get("type") != LOG_TYPE_CALL or detail.get("status") != "running":
+            return False, current
+        stop_requested_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        updated = self.update_call(log_id, detail_patch={"stop_requested_at": stop_requested_at})
+        active_registry = registry or image_task_registry
+        if active_registry.request_stop(log_id):
+            return True, updated
+        return True, self.update_call(
+            log_id,
+            summary="文生图 已停止",
+            detail_patch={"status": "stopped", "stage": "stopped", "stopped_at": stop_requested_at},
+        )
+
     def list(
         self,
         type: str = "",
@@ -88,6 +200,9 @@ class LogService:
         account_email: str = "",
         status: str = "",
         summary: str = "",
+        model: str = "",
+        endpoint: str = "",
+        batch_id: str = "",
     ) -> dict[str, Any]:
         """分页查询日志，倒序（最新在前）。列表接口不返回大字段。"""
         result = self.store.list(
@@ -100,6 +215,9 @@ class LogService:
             account_email=account_email,
             status=status,
             summary=summary,
+            model=model,
+            endpoint=endpoint,
+            batch_id=batch_id,
         )
         for item in result["items"]:
             detail = item.get("detail")
@@ -116,6 +234,34 @@ class LogService:
 
 
 log_service = LogService(DATA_DIR / "logs.jsonl")
+
+
+def create_image_task_log_context(
+    service: LogService,
+    registry: ImageTaskRegistry,
+    template: dict[str, Any],
+    *,
+    batch_id: str,
+    image_index: int,
+    image_total: int,
+) -> ImageTaskLogContext:
+    detail = dict(template)
+    detail.update({
+        "status": "running",
+        "batch_id": batch_id,
+        "image_index": image_index,
+        "image_total": image_total,
+        "stage": "getting_account",
+        "retry_count": 0,
+    })
+    item = service.create_call(detail, "文生图 进行中")
+    return ImageTaskLogContext(
+        log_id=str(item["id"]),
+        batch_id=batch_id,
+        image_index=image_index,
+        image_total=image_total,
+        cancel_event=registry.register(str(item["id"])),
+    )
 
 
 def _collect_urls(value: object) -> list[str]:
@@ -566,6 +712,7 @@ class LoggedCall:
     request_shape: dict[str, int] | None = None
     request_urls: list[str] | None = None
     image_base_url: str = ""
+    skip_final_log: bool = False
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.account_service import AccountModelUnavailableError
@@ -668,6 +815,8 @@ class LoggedCall:
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
             response_text: str = "", cache_hit: bool = False, response_image_urls: list[str] | None = None) -> None:
+        if self.skip_final_log:
+            return
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),

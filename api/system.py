@@ -138,6 +138,9 @@ def create_router(app_version: str) -> APIRouter:
         account_email: str = "",
         status: str = "",
         summary: str = "",
+        model: str = "",
+        endpoint: str = "",
+        batch_id: str = "",
         authorization: str | None = Header(default=None),
     ):
         require_admin(authorization)
@@ -156,6 +159,9 @@ def create_router(app_version: str) -> APIRouter:
             account_email=account_email.strip(),
             status=status.strip(),
             summary=summary.strip(),
+            model=model.strip(),
+            endpoint=endpoint.strip(),
+            batch_id=batch_id.strip(),
         )
 
     @router.get("/api/logs/{log_id}")
@@ -165,6 +171,14 @@ def create_router(app_version: str) -> APIRouter:
         if item is None:
             raise HTTPException(status_code=404, detail={"error": "log not found"})
         return item
+
+    @router.post("/api/logs/{log_id}/stop")
+    async def stop_log(log_id: str, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        stopped, item = await run_in_threadpool(log_service.request_stop, log_id.strip())
+        if item is None:
+            raise HTTPException(status_code=404, detail={"error": "log not found"})
+        return {"stopped": stopped, "item": item}
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):

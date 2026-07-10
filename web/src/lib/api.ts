@@ -675,6 +675,9 @@ export async function fetchSystemLogs(filters: {
   account_email?: string;
   status?: string;
   summary?: string;
+  model?: string;
+  endpoint?: string;
+  batch_id?: string;
 }) {
   const params = new URLSearchParams();
   if (filters.type) params.set("type", filters.type);
@@ -686,6 +689,9 @@ export async function fetchSystemLogs(filters: {
   if (filters.account_email) params.set("account_email", filters.account_email);
   if (filters.status) params.set("status", filters.status);
   if (filters.summary) params.set("summary", filters.summary);
+  if (filters.model) params.set("model", filters.model);
+  if (filters.endpoint) params.set("endpoint", filters.endpoint);
+  if (filters.batch_id) params.set("batch_id", filters.batch_id);
   return httpRequest<SystemLogPage>(`/api/logs${params.toString() ? `?${params.toString()}` : ""}`);
 }
 
@@ -698,6 +704,15 @@ export async function deleteSystemLogs(ids: string[]) {
     method: "POST",
     body: { ids },
   });
+}
+
+export async function stopSystemLog(logId: string) {
+  return httpRequest<{ stopped: boolean; item: SystemLog }>(`/api/logs/${encodeURIComponent(logId)}/stop`, { method: "POST" });
+}
+
+export async function fetchAccountInflight(accessToken: string) {
+  const params = new URLSearchParams({ access_token: accessToken });
+  return httpRequest<{ items: SystemLog[] }>(`/api/accounts/inflight?${params.toString()}`);
 }
 
 export async function fetchUserKeys() {

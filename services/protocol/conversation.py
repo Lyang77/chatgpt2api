@@ -7,6 +7,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Iterable, Iterator
 
 import tiktoken
@@ -14,6 +15,13 @@ import tiktoken
 from services.account_service import AccountModelUnavailableError, account_service
 from services.config import config
 from services.image_storage_service import image_storage_service
+from services.log_service import (
+    ImageTaskLogContext,
+    collect_response_image_urls,
+    create_image_task_log_context,
+    image_task_registry,
+    log_service,
+)
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
@@ -57,6 +65,12 @@ class ImageGenerationError(Exception):
         if self.account_email:
             error_dict["error"]["account_email"] = self.account_email
         return error_dict
+
+
+class ImageGenerationStopped(ImageGenerationError):
+    def __init__(self, log_id: str = "") -> None:
+        super().__init__("image task stopped", status_code=499, error_type="cancelled", code="image_task_stopped")
+        self.log_id = log_id
 
 
 def public_image_error_message(message: str) -> str:
@@ -309,6 +323,8 @@ class ConversationRequest:
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
     account_email: str = ""
+    image_task_log_template: dict[str, Any] | None = None
+    image_task_batch_id: str = ""
 
 
 @dataclass
@@ -1252,10 +1268,60 @@ def stream_codex_image_outputs(
     raise ImageGenerationError("No image result found in response")
 
 
+def _raise_if_image_task_stopped(context: ImageTaskLogContext | None) -> None:
+    if context is not None and context.cancel_event.is_set():
+        raise ImageGenerationStopped(context.log_id)
+
+
+def _update_image_task_log(context: ImageTaskLogContext | None, *, summary: str | None = None, **detail_patch: Any) -> None:
+    if context is not None:
+        log_service.update_call(context.log_id, summary=summary, detail_patch=detail_patch)
+
+
 def _generate_single_image(
         request: ConversationRequest,
         index: int,
         total: int,
+) -> list[ImageOutput]:
+    context: ImageTaskLogContext | None = None
+    if request.image_task_log_template:
+        context = create_image_task_log_context(
+            log_service,
+            image_task_registry,
+            request.image_task_log_template,
+            batch_id=request.image_task_batch_id,
+            image_index=index,
+            image_total=total,
+        )
+    try:
+        outputs = _generate_single_image_with_context(request, index, total, context)
+    except ImageGenerationStopped:
+        _update_image_task_log(context, summary="文生图 已停止", status="stopped", stage="stopped", stopped_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        raise
+    except Exception as exc:
+        _update_image_task_log(context, summary="文生图 失败", status="failed", stage="failed", error=str(exc))
+        raise
+    else:
+        status = "success" if any(output.kind == "result" for output in outputs) else "failed"
+        result_payload = {"data": [item for output in outputs for item in output.data]}
+        _update_image_task_log(
+            context,
+            summary="文生图 完成" if status == "success" else "文生图 失败",
+            status=status,
+            stage=status,
+            response_image_urls=collect_response_image_urls(result_payload, request.base_url or ""),
+        )
+        return outputs
+    finally:
+        if context is not None:
+            image_task_registry.unregister(context.log_id)
+
+
+def _generate_single_image_with_context(
+        request: ConversationRequest,
+        index: int,
+        total: int,
+        context: ImageTaskLogContext | None,
 ) -> list[ImageOutput]:
     """为单张图片执行生成逻辑（含重试），返回结果列表。
 
@@ -1278,9 +1344,11 @@ def _generate_single_image(
     account_email = ""
 
     while True:
+        _raise_if_image_task_stopped(context)
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
+            _update_image_task_log(context, stage="getting_account")
             plan_type, _ = split_image_model(request.model)
             codex_model = is_codex_image_model(request.model)
             token = account_service.get_available_access_token(
@@ -1305,6 +1373,12 @@ def _generate_single_image(
         returned_result = False
         account = account_service.get_account(token) or {}
         account_email = str(account.get("email") or "").strip()
+        try:
+            _raise_if_image_task_stopped(context)
+        except ImageGenerationStopped:
+            account_service.mark_image_result(token, False)
+            raise
+        _update_image_task_log(context, stage="generating", account_email=account_email)
         logger.debug({
             "event": "image_account_lookup",
             "token_prefix": token[:12] + "..." if len(token) > 12 else token,
@@ -1320,6 +1394,8 @@ def _generate_single_image(
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
             for output in stream_fn(backend, request, index, total):
+                _raise_if_image_task_stopped(context)
+                _update_image_task_log(context, stage="polling" if output.kind == "progress" else "generating")
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
@@ -1351,8 +1427,12 @@ def _generate_single_image(
                         conversation_id=conv_id,
                     )
                 return outputs
+            _raise_if_image_task_stopped(context)
             account_service.mark_image_result(token, True)
             return outputs
+        except ImageGenerationStopped:
+            account_service.mark_image_result(token, False)
+            raise
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)
             if account_email:
