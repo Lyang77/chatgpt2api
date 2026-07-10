@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
-import json
 import itertools
 import time
 from dataclasses import dataclass, field
@@ -18,6 +16,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR
 from services.image_storage_service import image_storage_service
+from services.log_store import SQLiteLogStore
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
@@ -64,57 +63,7 @@ class LogService:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
-
-    @staticmethod
-    def _legacy_id(raw_line: str, line_number: int) -> str:
-        payload = f"{line_number}:{raw_line}".encode("utf-8", errors="ignore")
-        return hashlib.sha1(payload).hexdigest()[:24]
-
-    def _parse_line(self, raw_line: str, line_number: int) -> dict[str, Any] | None:
-        try:
-            item = json.loads(raw_line)
-        except Exception:
-            return None
-        if not isinstance(item, dict):
-            return None
-        parsed = dict(item)
-        parsed["id"] = str(parsed.get("id") or self._legacy_id(raw_line, line_number))
-        return parsed
-
-    @staticmethod
-    def _serialize_item(item: dict[str, Any]) -> str:
-        return json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-
-    @staticmethod
-    def _matches_filters(
-        item: dict[str, Any],
-        *,
-        type: str = "",
-        start_date: str = "",
-        end_date: str = "",
-        key_name: str = "",
-        account_email: str = "",
-        status: str = "",
-        summary: str = "",
-    ) -> bool:
-        t = str(item.get("time") or "")
-        day = t[:10]
-        if type and item.get("type") != type:
-            return False
-        if start_date and day < start_date:
-            return False
-        if end_date and day > end_date:
-            return False
-        detail = item.get("detail") or {}
-        if key_name and key_name.lower() not in str(detail.get("key_name") or "").lower():
-            return False
-        if account_email and account_email.lower() not in str(detail.get("account_email") or "").lower():
-            return False
-        if status and str(detail.get("status") or "") != status:
-            return False
-        if summary and summary.lower() not in str(item.get("summary") or "").lower():
-            return False
-        return True
+        self.store = SQLiteLogStore(path.with_suffix(".db"), path)
 
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
@@ -124,8 +73,7 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(self._serialize_item(item) + "\n")
+        self.store.append(item)
 
     def list(
         self,
@@ -139,75 +87,30 @@ class LogService:
         status: str = "",
         summary: str = "",
     ) -> dict[str, Any]:
-        """分页查询日志，倒序（最新在前）。一次遍历同时计算 total 和当前页数据。
-        列表接口不返回大字段，减少传输量。"""
-        if not self.path.exists():
-            return {"items": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        total = 0
-        items: list[dict[str, Any]] = []
-        start_index = (page - 1) * page_size
-        end_index = start_index + page_size
-        for line_number in range(len(lines) - 1, -1, -1):
-            item = self._parse_line(lines[line_number], line_number)
-            if item is None:
-                continue
-            if not self._matches_filters(
-                item,
-                type=type,
-                start_date=start_date,
-                end_date=end_date,
-                key_name=key_name,
-                account_email=account_email,
-                status=status,
-                summary=summary,
-            ):
-                continue
-            if start_index <= total < end_index:
-                detail = item.get("detail")
-                if isinstance(detail, dict) and any(key in detail for key in LOG_LIST_OMITTED_DETAIL_KEYS):
-                    detail = {k: v for k, v in detail.items() if k not in LOG_LIST_OMITTED_DETAIL_KEYS}
-                    item = {**item, "detail": detail}
-                items.append(item)
-            total += 1
-        total_pages = (total + page_size - 1) // page_size if total > 0 else 0
-        return {"items": items, "total": total, "page": page, "page_size": page_size, "total_pages": total_pages}
+        """分页查询日志，倒序（最新在前）。列表接口不返回大字段。"""
+        result = self.store.list(
+            type=type,
+            start_date=start_date,
+            end_date=end_date,
+            page=page,
+            page_size=page_size,
+            key_name=key_name,
+            account_email=account_email,
+            status=status,
+            summary=summary,
+        )
+        for item in result["items"]:
+            detail = item.get("detail")
+            if isinstance(detail, dict) and any(key in detail for key in LOG_LIST_OMITTED_DETAIL_KEYS):
+                item["detail"] = {key: value for key, value in detail.items() if key not in LOG_LIST_OMITTED_DETAIL_KEYS}
+        return result
 
     def get_by_id(self, log_id: str) -> dict[str, Any] | None:
         """根据 ID 查询单条日志完整数据（含 request_text）。"""
-        target_id = str(log_id or "").strip()
-        if not target_id or not self.path.exists():
-            return None
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        for line_number in range(len(lines) - 1, -1, -1):
-            item = self._parse_line(lines[line_number], line_number)
-            if item is None:
-                continue
-            if item.get("id") == target_id:
-                return item
-        return None
+        return self.store.get_by_id(log_id)
 
     def delete(self, ids: list[str]) -> dict[str, int]:
-        target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
-        if not self.path.exists() or not target_ids:
-            return {"removed": 0}
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        kept_lines: list[str] = []
-        removed = 0
-        for line_number, raw_line in enumerate(lines):
-            item = self._parse_line(raw_line, line_number)
-            if item is None:
-                kept_lines.append(raw_line)
-                continue
-            if str(item.get("id") or "") in target_ids:
-                removed += 1
-                continue
-            kept_lines.append(self._serialize_item(item))
-        content = "\n".join(kept_lines)
-        if content:
-            content += "\n"
-        self.path.write_text(content, encoding="utf-8")
-        return {"removed": removed}
+        return {"removed": self.store.delete(ids)}
 
 
 log_service = LogService(DATA_DIR / "logs.jsonl")

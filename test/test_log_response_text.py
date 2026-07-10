@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,8 +32,10 @@ class LoggedCallResponseTextTests(unittest.TestCase):
         return detail
 
     def _last_item(self) -> dict[str, object]:
-        line = self.path.read_text(encoding="utf-8").splitlines()[-1]
-        item = json.loads(line)
+        listed = log_module.log_service.list(page=1, page_size=1)
+        self.assertEqual(listed["total"], 1)
+        item_id = str(listed["items"][0]["id"])
+        item = log_module.log_service.get_by_id(item_id)
         self.assertIsInstance(item, dict)
         return item
 

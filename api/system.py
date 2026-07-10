@@ -145,7 +145,8 @@ def create_router(app_version: str) -> APIRouter:
             page = 1
         if page_size < 1 or page_size > 200:
             page_size = 20
-        return log_service.list(
+        return await run_in_threadpool(
+            log_service.list,
             type=type.strip(),
             start_date=start_date.strip(),
             end_date=end_date.strip(),
@@ -160,7 +161,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/logs/{log_id}")
     async def get_log_detail(log_id: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        item = log_service.get_by_id(log_id.strip())
+        item = await run_in_threadpool(log_service.get_by_id, log_id.strip())
         if item is None:
             raise HTTPException(status_code=404, detail={"error": "log not found"})
         return item
@@ -168,7 +169,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return log_service.delete(body.ids)
+        return await run_in_threadpool(log_service.delete, body.ids)
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
