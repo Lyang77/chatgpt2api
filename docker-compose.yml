@@ -1,6 +1,7 @@
 services:
   app:
     build: .
+    pull_policy: build
     container_name: chatgpt2api
     restart: unless-stopped
     ports:

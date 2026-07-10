@@ -203,6 +203,7 @@ curl http://localhost:8000/v1/images/generations \
     "model": "gpt-image-2",
     "prompt": "一只漂浮在太空里的猫",
     "n": 1,
+    "output_format": "jpeg",
     "response_format": "b64_json"
   }'
 ```
@@ -216,6 +217,7 @@ curl http://localhost:8000/v1/images/generations \
 | `model`           | 图片模型，当前可用值以 `/v1/models` 返回结果为准，推荐使用 `gpt-image-2` |
 | `prompt`          | 图片生成提示词                                            |
 | `n`               | 生成数量，当前后端限制为 `1-4`                                 |
+| `output_format`   | 输出图片编码格式，支持 `png`、`jpeg`、`webp`，默认 `png`          |
 | `response_format` | 当前请求模型中包含该字段，默认值为 `b64_json`                       |
 
 <br>
@@ -234,6 +236,7 @@ curl http://localhost:8000/v1/images/edits \
   -F "model=gpt-image-2" \
   -F "prompt=把这张图改成赛博朋克夜景风格" \
   -F "n=1" \
+  -F "output_format=jpeg" \
   -F "image=@./input.png"
 ```
 
@@ -261,6 +264,7 @@ curl http://localhost:8000/v1/images/edits \
 | `model`     | 图片模型， `gpt-image-2`                           |
 | `prompt`    | 图片编辑提示词                                       |
 | `n`         | 生成数量，当前后端限制为 `1-4`                            |
+| `output_format` | 输出图片编码格式，支持 `png`、`jpeg`、`webp`，默认 `png`  |
 | `image`     | 需要编辑的图片文件，使用 multipart/form-data 上传           |
 | `images`    | JSON 图片引用数组，支持 `{"image_url": "https://..."}` |
 | `image_url` | 表单模式下也可直接传图片链接，支持重复字段传多张图                     |

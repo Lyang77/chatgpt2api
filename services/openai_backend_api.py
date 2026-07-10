@@ -740,6 +740,7 @@ class OpenAIBackendAPI:
             images: list[str] | None = None,
             size: str | None = None,
             quality: str = "auto",
+            output_format: str = "png",
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex image endpoints")
@@ -756,7 +757,7 @@ class OpenAIBackendAPI:
                 "action": "edit" if images else "generate",
                 "size": str(size or "1024x1024"),
                 "quality": str(quality or "auto"),
-                "output_format": "png",
+                "output_format": str(output_format or "png"),
             }],
             "tool_choice": {"type": "image_generation"},
             "stream": True,

@@ -68,6 +68,46 @@ class ImageEditsJsonApiTests(unittest.TestCase):
         self.assertEqual(payload["images"], [(b"fake-png", "image_1.png", "image/png")])
         self.assertEqual(payload["size"], "1024x1536")
 
+    def test_image_edit_preserves_output_format(self):
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            json={
+                "model": "codex-gpt-image-2",
+                "prompt": "输出 JPEG",
+                "output_format": "jpeg",
+                "image": PNG_DATA_URL,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.calls[0]["output_format"], "jpeg")
+
+    def test_image_generation_preserves_output_format(self):
+        calls = []
+
+        def fake_generation_handle(payload):
+            calls.append(payload)
+            return {"created": 1, "data": [{"b64_json": "ZmFrZQ=="}]}
+
+        with mock.patch.object(
+            ai_module.openai_v1_image_generations,
+            "handle",
+            fake_generation_handle,
+        ):
+            response = self.client.post(
+                "/v1/images/generations",
+                headers=AUTH_HEADERS,
+                json={
+                    "model": "codex-gpt-image-2",
+                    "prompt": "输出 JPEG",
+                    "output_format": "jpeg",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(calls[0]["output_format"], "jpeg")
+
     def test_image_edit_accepts_json_multiple_images_and_b64_json(self):
         response = self.client.post(
             "/v1/images/edits",
@@ -105,6 +145,21 @@ class ImageEditsJsonApiTests(unittest.TestCase):
             (b"two", "two.jpg", "image/jpeg"),
             (b"three", "three.webp", "image/webp"),
         ])
+
+    def test_image_edit_multipart_preserves_output_format(self):
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            data={
+                "prompt": "multipart 输出 JPEG",
+                "model": "codex-gpt-image-2",
+                "output_format": "jpeg",
+            },
+            files=[("image", ("one.png", b"one", "image/png"))],
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.calls[0]["output_format"], "jpeg")
 
     def test_image_edit_rejects_json_without_image(self):
         response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "缺少图片"})
