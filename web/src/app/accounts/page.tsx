@@ -5,6 +5,7 @@ import type { ComponentProps } from "react";
 import {
   Ban,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
@@ -35,7 +36,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   Select,
   SelectContent,
@@ -166,10 +167,6 @@ function displayAccountSource(account: Account) {
   return source;
 }
 
-function parseAllowedModels(value: string) {
-  return Array.from(new Set(value.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean)));
-}
-
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -183,7 +180,7 @@ function AccountsPageContent() {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [editProxy, setEditProxy] = useState("");
-  const [editAllowedModels, setEditAllowedModels] = useState("");
+  const [editAllowedModels, setEditAllowedModels] = useState<string[]>([]);
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
@@ -289,6 +286,23 @@ function AccountsPageContent() {
     ],
     [accounts],
   );
+
+  const editModelOptions = useMemo(() => {
+    return Array.from(new Set([
+      ...availableModels.map((model) => model.id.trim()).filter(Boolean),
+      ...editAllowedModels,
+    ])).sort((left, right) => left.localeCompare(right));
+  }, [availableModels, editAllowedModels]);
+
+  const editAllowedModelsLabel = useMemo(() => {
+    if (editAllowedModels.length === 0) {
+      return "不限";
+    }
+    if (editAllowedModels.length === 1) {
+      return editAllowedModels[0];
+    }
+    return `${editAllowedModels[0]} 等 ${editAllowedModels.length} 个模型`;
+  }, [editAllowedModels]);
 
   const selectedTokens = useMemo(() => {
     const selectedSet = new Set(selectedIds);
@@ -659,7 +673,16 @@ function AccountsPageContent() {
     setEditingAccount(account);
     setEditStatus(account.status);
     setEditProxy(account.proxy ?? "");
-    setEditAllowedModels((account.allowed_models ?? []).join("\n"));
+    setEditAllowedModels(account.allowed_models ?? []);
+  };
+
+  const toggleEditAllowedModel = (model: string, checked: boolean) => {
+    setEditAllowedModels((current) => {
+      if (checked) {
+        return Array.from(new Set([...current, model]));
+      }
+      return current.filter((item) => item !== model);
+    });
   };
 
   const handleTestAccountProxy = async () => {
@@ -691,7 +714,7 @@ function AccountsPageContent() {
       const data = await updateAccount(editingAccount.access_token, {
         status: editStatus,
         proxy: editProxy.trim(),
-        allowed_models: parseAllowedModels(editAllowedModels),
+        allowed_models: editAllowedModels,
       });
       setAccounts(data.items);
       setSelectedIds((prev) => prev.filter((id) => data.items.some((item) => item.access_token === id)));
@@ -833,13 +856,63 @@ function AccountsPageContent() {
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">允许模型</label>
-              <Textarea
-                value={editAllowedModels}
-                onChange={(event) => setEditAllowedModels(event.target.value)}
-                placeholder={"gpt-5-3\ngpt-5-5"}
-                className="min-h-24 rounded-xl border-stone-200 bg-white"
-              />
-              <p className="text-xs text-stone-500">留空不限</p>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-11 w-full justify-between rounded-xl border-stone-200 bg-white px-3 font-normal text-stone-700 hover:bg-stone-50"
+                  >
+                    <span className="truncate">{editAllowedModelsLabel}</span>
+                    <ChevronDown className="size-4 shrink-0 text-stone-500" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[var(--radix-popover-trigger-width)] p-2">
+                  <div className="flex items-center justify-between px-2 py-1.5">
+                    <span className="text-xs font-medium text-stone-500">允许模型</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-xs text-stone-600 hover:bg-stone-100"
+                      onClick={() => setEditAllowedModels([])}
+                      disabled={editAllowedModels.length === 0}
+                    >
+                      清空
+                    </Button>
+                  </div>
+                  <div className="max-h-64 space-y-1 overflow-y-auto p-1">
+                    {isLoadingModels ? (
+                      <div className="flex items-center gap-2 px-2 py-3 text-sm text-stone-500">
+                        <LoaderCircle className="size-4 animate-spin" />
+                        正在加载模型
+                      </div>
+                    ) : editModelOptions.length > 0 ? (
+                      editModelOptions.map((model) => {
+                        const checked = editAllowedModels.includes(model);
+                        return (
+                          <div
+                            key={model}
+                            className="flex items-center gap-2 rounded-lg px-2 py-2 text-sm text-stone-700 hover:bg-stone-50"
+                          >
+                            <Checkbox
+                              id={`allowed-model-${model}`}
+                              checked={checked}
+                              onCheckedChange={(value) => toggleEditAllowedModel(model, value === true)}
+                            />
+                            <label htmlFor={`allowed-model-${model}`} className="min-w-0 flex-1 cursor-pointer truncate" title={model}>
+                              {model}
+                            </label>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <p className="px-2 py-3 text-sm text-stone-500">暂无可选模型</p>
+                    )}
+                  </div>
+                </PopoverContent>
+              </Popover>
+              <p className="text-xs text-stone-500">清空后不限模型</p>
             </div>
           </div>
           <DialogFooter className="pt-2">

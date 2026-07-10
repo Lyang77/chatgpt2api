@@ -36,9 +36,17 @@ inside both text and image candidate selection.
 ## Administration UI
 
 The account update API accepts an optional `allowed_models` array. The account
-edit dialog edits the allowlist as model IDs and the account list displays the
-configured set or an unrestricted state. Imported account payloads retain the
-field when present; refresh and token rotation preserve it.
+edit dialog uses a multi-select dropdown backed by the existing `/v1/models`
+endpoint: every returned model ID is selectable by checkbox, and clearing the
+selection means unrestricted. The trigger summarizes the selected model IDs
+without exposing a free-text model input.
+
+Current `allowed_models` values are merged into the dropdown options while the
+dialog is open. This preserves historical selections that are temporarily not
+returned by `/v1/models` and prevents an ordinary status or proxy update from
+silently deleting them. The account list displays the configured set or an
+unrestricted state. Imported account payloads retain the field when present;
+refresh and token rotation preserve it.
 
 ## Compatibility And Verification
 

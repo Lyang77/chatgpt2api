@@ -22,7 +22,7 @@
 - `services/protocol/conversation.py`：文本初选、重试与图片选号的模型透传。
 - `services/protocol/openai_v1_chat_complete.py`、`openai_v1_response.py`、`anthropic_v1_messages.py`、`openai_search.py`、`web_search_tool.py`：协议入口传递模型。
 - `api/accounts.py`：接收 `allowed_models` 更新。
-- `web/src/lib/api.ts`、`web/src/app/accounts/page.tsx`：编辑和展示白名单。
+- `web/src/lib/api.ts`、`web/src/app/accounts/page.tsx`：编辑和展示白名单；编辑页复用 `/v1/models` 的模型选项。
 - `test/test_account_model_allowlist.py`、`test/test_model_account_routing.py`：领域和协议回归。
 
 ### 任务 1：账号白名单领域逻辑
@@ -156,7 +156,7 @@ def test_account_update_persists_allowed_models(self):
 
 - [x] **步骤 3：实现 API 与编辑页**
 
-后端仅将非 `None` 的 `allowed_models` 写入账号。前端编辑弹窗使用 `Textarea`，每行或逗号一个模型；提交时切分、trim、去空值。账号列表展示 `不限` 或模型标签，并使用更新 API 返回的账号列表刷新。
+后端仅将非 `None` 的 `allowed_models` 写入账号。账号列表展示 `不限` 或模型标签，并使用更新 API 返回的账号列表刷新。
 
 - [x] **步骤 4：验证前后端契约**
 
@@ -165,6 +165,30 @@ def test_account_update_persists_allowed_models(self):
 运行：`npm run build`（目录：`web`）。
 
 预期：Python 测试与 Next.js 生产构建通过。
+
+### 任务 5：模型白名单多选下拉
+
+**文件：**
+- 修改：`web/src/app/accounts/page.tsx`
+
+**接口：**
+- 复用已加载的 `availableModels: Model[]`。
+- 编辑状态从文本改为 `string[]`，提交时直接作为 `allowed_models` 发送。
+- 选项集合为 `/v1/models` 返回 ID 与当前账号 `allowed_models` 的去重并集。
+
+- [ ] **步骤 1：写失败的交互回归检查**
+
+在编辑账号的浏览器验证中，确认模型字段不是文本域，并能勾选多个 `/v1/models` 选项、清空为不限、保留当前账号中未出现在模型列表的历史模型。
+
+- [ ] **步骤 2：实现最小多选控件**
+
+用现有 `Popover`、`Button` 和 `Checkbox` 组成多选下拉。触发器显示“不限”或选中模型数与首个模型；下拉列表按模型 ID 排序，勾选即时更新 `string[]` 状态。提供“清空”命令，不新增自由文本输入。
+
+- [ ] **步骤 3：验证保存契约与界面**
+
+运行：`npm run build`（目录：`web`）。
+
+访问：`http://localhost:3001/accounts`。编辑一个账号，验证多选、清空和保存后列表标签与 API 返回值一致。
 
 ### 任务 4：回归与差异审查
 
