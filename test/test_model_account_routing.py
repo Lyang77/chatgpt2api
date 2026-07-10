@@ -7,6 +7,7 @@ from unittest import mock
 from services.account_service import AccountModelUnavailableError
 from services.log_service import LoggedCall
 import services.protocol.conversation as conversation_module
+import services.protocol.openai_v1_chat_complete as chat_completion_module
 from services.protocol.conversation import ConversationRequest, ImageGenerationError
 
 
@@ -25,6 +26,24 @@ class ModelAccountRoutingTests(unittest.TestCase):
 
         select.assert_called_once_with("gpt-5-3")
         self.assertEqual(backend.access_token, "token-a")
+
+    def test_chat_completion_passes_requested_model_to_account_selection(self) -> None:
+        with (
+            mock.patch.object(chat_completion_module, "text_backend", return_value=_FakeBackend()) as select,
+            mock.patch.object(chat_completion_module, "collect_text", return_value="ok"),
+            mock.patch.object(
+                chat_completion_module.chat_completion_cache,
+                "get_or_compute_response",
+                side_effect=lambda _key, compute: compute(),
+            ),
+        ):
+            response = chat_completion_module.handle({
+                "model": "gpt-5-5",
+                "messages": [{"role": "user", "content": "hello"}],
+            })
+
+        select.assert_called_once_with("gpt-5-5")
+        self.assertEqual(response["model"], "gpt-5-5")
 
     def test_image_pool_selection_receives_requested_model(self) -> None:
         with mock.patch.object(
