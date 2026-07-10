@@ -94,6 +94,32 @@ class LoggedCallResponseTextTests(unittest.TestCase):
         self.assertNotIn("_account_email", emitted[0])
         self.assertEqual(self._last_detail().get("account_email"), "executor@example.test")
 
+    def test_stream_log_records_markdown_image_as_stable_url(self) -> None:
+        stored = SimpleNamespace(url="http://app.test/images/stream-output.png")
+        call = LoggedCall(
+            IDENTITY,
+            "/v1/chat/completions",
+            "gpt-image-2",
+            "图片生成",
+            image_base_url="http://app.test",
+        )
+        chunks = [{
+            "choices": [{
+                "delta": {"content": "![image](data:image/png;base64,ZmFrZS1pbWFnZQ==)"},
+                "finish_reason": "stop",
+            }],
+        }]
+
+        with mock.patch("services.log_service.image_storage_service.save", return_value=stored) as save:
+            emitted = list(call.stream(iter(chunks)))
+
+        self.assertEqual(emitted, chunks)
+        save.assert_called_once_with(b"fake-image", "http://app.test")
+        self.assertEqual(
+            self._last_detail().get("response_image_urls"),
+            ["http://app.test/images/stream-output.png"],
+        )
+
     def test_log_list_omits_response_text_but_detail_keeps_it(self) -> None:
         call = LoggedCall(
             IDENTITY,
@@ -200,6 +226,46 @@ class LoggedCallResponseTextTests(unittest.TestCase):
             urls = collect_request_image_urls(payload, "http://app.test")
 
         self.assertEqual(urls, [])
+
+    def test_logged_call_records_response_images_as_stable_urls(self) -> None:
+        stored = SimpleNamespace(url="http://app.test/images/response-output.png")
+        call = LoggedCall(
+            IDENTITY,
+            "/v1/images/generations",
+            "gpt-image-2",
+            "文生图",
+            image_base_url="http://app.test",
+        )
+
+        with mock.patch("services.log_service.image_storage_service.save", return_value=stored) as save:
+            call.log("调用完成", {"data": [{"b64_json": "ZmFrZS1pbWFnZQ=="}]})
+
+        save.assert_called_once_with(b"fake-image", "http://app.test")
+        self.assertEqual(
+            self._last_detail().get("response_image_urls"),
+            ["http://app.test/images/response-output.png"],
+        )
+
+    def test_logged_call_records_responses_image_result_as_stable_url(self) -> None:
+        stored = SimpleNamespace(url="http://app.test/images/responses-output.png")
+        call = LoggedCall(
+            IDENTITY,
+            "/v1/responses",
+            "gpt-image-2",
+            "Responses",
+            image_base_url="http://app.test",
+        )
+
+        with mock.patch("services.log_service.image_storage_service.save", return_value=stored) as save:
+            call.log("调用完成", {
+                "output": [{"type": "image_generation_call", "result": "ZmFrZS1pbWFnZQ=="}],
+            })
+
+        save.assert_called_once_with(b"fake-image", "http://app.test")
+        self.assertEqual(
+            self._last_detail().get("response_image_urls"),
+            ["http://app.test/images/responses-output.png"],
+        )
 
 
 if __name__ == "__main__":

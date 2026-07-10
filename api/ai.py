@@ -9,7 +9,7 @@ from api.image_inputs import parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
-from services.log_service import LoggedCall
+from services.log_service import LoggedCall, collect_request_image_input_urls, collect_request_image_urls
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -97,8 +97,16 @@ def create_router() -> APIRouter:
     ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
-        payload["base_url"] = resolve_image_base_url(request)
-        call = LoggedCall(identity, "/v1/images/generations", body.model, "文生图", request_text=body.prompt)
+        image_base_url = resolve_image_base_url(request)
+        payload["base_url"] = image_base_url
+        call = LoggedCall(
+            identity,
+            "/v1/images/generations",
+            body.model,
+            "文生图",
+            request_text=body.prompt,
+            image_base_url=image_base_url,
+        )
         await filter_or_log(call, body.prompt)
         return await call.run(openai_v1_image_generations.handle, payload)
 
@@ -111,20 +119,38 @@ def create_router() -> APIRouter:
         payload, image_sources, mask_sources = await parse_image_edit_request(request)
         prompt = str(payload["prompt"])
         model = str(payload["model"])
-        call = LoggedCall(identity, "/v1/images/edits", model, "图生图", request_text=prompt)
+        image_base_url = resolve_image_base_url(request)
+        call = LoggedCall(
+            identity,
+            "/v1/images/edits",
+            model,
+            "图生图",
+            request_text=prompt,
+            image_base_url=image_base_url,
+        )
         await filter_or_log(call, prompt)
-        payload["images"] = await read_image_sources(image_sources)
+        images = await read_image_sources(image_sources)
+        payload["images"] = images
+        request_urls = collect_request_image_input_urls(images, image_base_url)
         if mask_sources:
-            payload["mask"] = await read_image_sources(mask_sources)
-        payload["base_url"] = resolve_image_base_url(request)
+            mask = await read_image_sources(mask_sources)
+            payload["mask"] = mask
+            request_urls.extend(collect_request_image_input_urls(mask, image_base_url))
+        call.request_urls = list(dict.fromkeys(url for url in request_urls if url))
+        payload["base_url"] = image_base_url
         return await call.run(openai_v1_image_edit.handle, payload)
 
     @router.post("/v1/chat/completions")
-    async def create_chat_completion(body: ChatCompletionRequest, authorization: str | None = Header(default=None)):
+    async def create_chat_completion(
+            body: ChatCompletionRequest,
+            request: Request,
+            authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("prompt"), payload.get("messages"))
+        image_base_url = resolve_image_base_url(request)
         call = LoggedCall(
             identity,
             "/v1/chat/completions",
@@ -132,16 +158,23 @@ def create_router() -> APIRouter:
             "文本生成",
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
+            request_urls=collect_request_image_urls(payload, image_base_url),
+            image_base_url=image_base_url,
         )
         await filter_or_log(call, request_preview)
         return await call.run(openai_v1_chat_complete.handle, payload)
 
     @router.post("/v1/responses")
-    async def create_response(body: ResponseCreateRequest, authorization: str | None = Header(default=None)):
+    async def create_response(
+            body: ResponseCreateRequest,
+            request: Request,
+            authorization: str | None = Header(default=None),
+    ):
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("input"), payload.get("instructions"))
+        image_base_url = resolve_image_base_url(request)
         call = LoggedCall(
             identity,
             "/v1/responses",
@@ -149,6 +182,8 @@ def create_router() -> APIRouter:
             "Responses",
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
+            request_urls=collect_request_image_urls(payload, image_base_url),
+            image_base_url=image_base_url,
         )
         await filter_or_log(call, request_preview)
         return await call.run(openai_v1_response.handle, payload)
@@ -156,6 +191,7 @@ def create_router() -> APIRouter:
     @router.post("/v1/messages")
     async def create_message(
             body: AnthropicMessageRequest,
+            request: Request,
             authorization: str | None = Header(default=None),
             x_api_key: str | None = Header(default=None, alias="x-api-key"),
             anthropic_version: str | None = Header(default=None, alias="anthropic-version"),
@@ -164,7 +200,16 @@ def create_router() -> APIRouter:
         payload = body.model_dump(mode="python")
         model = str(payload.get("model") or "auto")
         request_preview = request_text(payload.get("system"), payload.get("messages"), payload.get("tools"))
-        call = LoggedCall(identity, "/v1/messages", model, "Messages", request_text=request_preview)
+        image_base_url = resolve_image_base_url(request)
+        call = LoggedCall(
+            identity,
+            "/v1/messages",
+            model,
+            "Messages",
+            request_text=request_preview,
+            request_urls=collect_request_image_urls(payload, image_base_url),
+            image_base_url=image_base_url,
+        )
         await filter_or_log(call, request_preview)
         return await call.run(anthropic_v1_messages.handle, payload, sse="anthropic")
 

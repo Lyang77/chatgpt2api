@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import itertools
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -57,6 +58,7 @@ REQUEST_IMAGE_BASE64_KEYS = {
     "inputimagebase64",
     "inputimagebase64s",
 }
+MARKDOWN_IMAGE_DATA_URL_RE = re.compile(r"!\[[^\]]*\]\((data:image/[^)\s]+)\)", re.IGNORECASE)
 
 
 class LogService:
@@ -277,6 +279,51 @@ def collect_request_image_input_urls(images: list[tuple[bytes, str, str]] | None
             _add_unique_url(urls, _save_request_image(image_data, base_url))
         except Exception:
             continue
+    return urls
+
+
+def _collect_markdown_image_urls(urls: list[str], text: object, base_url: str) -> None:
+    if not isinstance(text, str):
+        return
+    for data_url in MARKDOWN_IMAGE_DATA_URL_RE.findall(text):
+        if len(urls) >= MAX_REQUEST_IMAGE_URLS:
+            return
+        _add_unique_url(urls, _save_request_image(_decode_data_image_url(data_url), base_url))
+
+
+def collect_response_image_urls(result: object, base_url: str = "", response_text: str = "") -> list[str]:
+    """Extract only OpenAI image-output shapes and persist inline image bytes for log previews."""
+    urls: list[str] = []
+    try:
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    _collect_request_image_url_value(urls, item.get("url"), base_url)
+                    _collect_request_base64_image_value(urls, item.get("b64_json"), base_url)
+
+            output = result.get("output")
+            if isinstance(output, list):
+                for item in output:
+                    if not isinstance(item, dict) or str(item.get("type") or "") != "image_generation_call":
+                        continue
+                    _collect_request_image_url_value(urls, item.get("url"), base_url)
+                    _collect_request_base64_image_value(urls, item.get("result"), base_url)
+
+            choices = result.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    message = choice.get("message") or choice.get("delta")
+                    if isinstance(message, dict):
+                        _collect_markdown_image_urls(urls, message.get("content"), base_url)
+
+        _collect_markdown_image_urls(urls, response_text, base_url)
+    except Exception:
+        return urls
     return urls
 
 
@@ -518,6 +565,7 @@ class LoggedCall:
     request_text: str = ""
     request_shape: dict[str, int] | None = None
     request_urls: list[str] | None = None
+    image_base_url: str = ""
 
     async def run(self, handler, *args, sse: str = "openai"):
         from services.account_service import AccountModelUnavailableError
@@ -571,6 +619,7 @@ class LoggedCall:
 
     def stream(self, items):
         urls: list[str] = []
+        response_image_urls: list[str] = []
         account_emails: list[str] = []
         conversation_ids: list[str] = []
         response_parts: list[str] = []
@@ -580,6 +629,7 @@ class LoggedCall:
         try:
             for item in items:
                 urls.extend(_collect_urls(item))
+                response_image_urls.extend(collect_response_image_urls(item, self.image_base_url))
                 account_emails.extend(_collect_account_emails(item))
                 conversation_ids.extend(_collect_conversation_ids(item))
                 cache_hit = cache_hit or _collect_cache_hit(item)
@@ -601,6 +651,7 @@ class LoggedCall:
                 conversation_id=(conversation_ids[0] if conversation_ids else getattr(exc, "conversation_id", "")),
                 response_text="".join(response_parts),
                 cache_hit=cache_hit,
+                response_image_urls=response_image_urls,
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -611,11 +662,12 @@ class LoggedCall:
             if not failed:
                 self.log("流式调用结束", urls=urls, account_email=account_emails[0] if account_emails else "",
                          conversation_id=conversation_ids[0] if conversation_ids else "",
-                         response_text="".join(response_parts), cache_hit=cache_hit)
+                         response_text="".join(response_parts), cache_hit=cache_hit,
+                         response_image_urls=response_image_urls)
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
-            response_text: str = "", cache_hit: bool = False) -> None:
+            response_text: str = "", cache_hit: bool = False, response_image_urls: list[str] | None = None) -> None:
         detail = {
             "key_id": self.identity.get("id"),
             "key_name": self.identity.get("name"),
@@ -634,7 +686,8 @@ class LoggedCall:
             detail["request_shape"] = self.request_shape
         if self.request_urls:
             detail["request_urls"] = list(dict.fromkeys(url for url in self.request_urls if url))
-        response_excerpt, response_truncated = _response_excerpt(response_text or _collect_response_text(result))
+        full_response_text = response_text or _collect_response_text(result)
+        response_excerpt, response_truncated = _response_excerpt(full_response_text)
         if response_excerpt:
             detail["response_text"] = response_excerpt
             if response_truncated:
@@ -658,4 +711,10 @@ class LoggedCall:
         collected_urls = [*(urls or []), *_collect_urls(result)]
         if collected_urls and not self.endpoint.startswith("/v1/search"):
             detail["urls"] = list(dict.fromkeys(collected_urls))
+        collected_response_image_urls = [
+            *(response_image_urls or []),
+            *collect_response_image_urls(result, self.image_base_url, full_response_text),
+        ]
+        if collected_response_image_urls:
+            detail["response_image_urls"] = list(dict.fromkeys(collected_response_image_urls))
         log_service.add(LOG_TYPE_CALL, f"{self.summary}{suffix}", detail)

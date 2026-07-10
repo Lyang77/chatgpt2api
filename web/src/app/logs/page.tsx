@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ChevronLeft, ChevronRight, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, Database, FileText, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+import { extractLogResultContent } from "@/lib/log-detail-content";
 
 const LogType = {
   Call: "call",
@@ -37,9 +38,52 @@ function formatDuration(item: SystemLog) {
   return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
 }
 
-function getUrls(item: SystemLog | null) {
-  const urls = item?.detail?.urls;
+type DetailTab = "result" | "request" | "raw";
+
+function getStringList(value: unknown) {
+  const urls = value;
   return Array.isArray(urls) ? urls.filter((url): url is string => typeof url === "string") : [];
+}
+
+function getResponseImageUrls(item: SystemLog | null) {
+  const responseImageUrls = getStringList(item?.detail?.response_image_urls);
+  if (responseImageUrls.length > 0) return responseImageUrls;
+  const endpoint = String(item?.detail?.endpoint || "");
+  return endpoint.startsWith("/v1/images/") ? getStringList(item?.detail?.urls) : [];
+}
+
+function getRequestImageUrls(item: SystemLog | null) {
+  return getStringList(item?.detail?.request_urls);
+}
+
+function getDetailValue(item: SystemLog | null, key: string) {
+  const value = item?.detail?.[key];
+  return typeof value === "string" || typeof value === "number" ? String(value) : "";
+}
+
+function DetailImageGallery({ title, urls, onOpen }: { title: string; urls: string[]; onOpen: (index: number) => void }) {
+  if (urls.length === 0) return null;
+  return (
+    <section className="space-y-3 border-t border-stone-100 pt-5">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-medium text-stone-800">{title}</h3>
+        <span className="text-xs text-stone-400">{urls.length} 张</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
+        {urls.map((url, index) => (
+          <button
+            key={`${url}-${index}`}
+            type="button"
+            className="aspect-square overflow-hidden rounded-lg border border-stone-200 bg-stone-100 transition hover:border-stone-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-400"
+            onClick={() => onOpen(index)}
+            aria-label={`预览${title}第 ${index + 1} 张`}
+          >
+            <ImageThumbnail src={url} thumbnailSrc={getImageThumbnailUrl(url)} className="h-full w-full" />
+          </button>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function getStatus(item: SystemLog) {
@@ -61,9 +105,10 @@ function LogsContent() {
   const [detailLog, setDetailLog] = useState<SystemLog | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
-  const [showRawJson, setShowRawJson] = useState(false);
+  const [detailTab, setDetailTab] = useState<DetailTab>("result");
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxImages, setLightboxImages] = useState<Array<{ id: string; src: string }>>([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
@@ -72,8 +117,13 @@ function LogsContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
-  const detailUrls = getUrls(detailLog);
-  const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
+  const responseImageUrls = getResponseImageUrls(detailLog);
+  const requestImageUrls = getRequestImageUrls(detailLog);
+  const responseResult = useMemo(
+    () => extractLogResultContent(detailLog?.detail?.response_text),
+    [detailLog],
+  );
+  const responseTextTruncated = detailLog?.detail?.response_text_truncated === true;
   const isCallLog = type === LogType.Call;
   const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -116,7 +166,7 @@ function LogsContent() {
   const openDetail = async (item: SystemLog) => {
     setDetailLog(item);
     setDetailOpen(true);
-    setShowRawJson(false);
+    setDetailTab("result");
     setIsDetailLoading(true);
     try {
       const fullDetail = await fetchSystemLogDetail(item.id);
@@ -128,10 +178,14 @@ function LogsContent() {
     }
   };
 
-  const openLogImage = (item: SystemLog, index: number) => {
-    setDetailLog(item);
+  const openImages = (urls: string[], index: number) => {
+    setLightboxImages(urls.map((url, imageIndex) => ({ id: `${imageIndex}`, src: url })));
     setLightboxIndex(index);
     setLightboxOpen(true);
+  };
+
+  const openLogImage = (item: SystemLog, index: number) => {
+    openImages(getResponseImageUrls(item), index);
   };
 
   const toggleIds = (ids: string[], checked: boolean) => {
@@ -265,7 +319,7 @@ function LogsContent() {
               </TableHeader>
               <TableBody>
                 {currentRows.map((item) => {
-                  const urls = getUrls(item);
+                  const urls = getResponseImageUrls(item);
                   return (
                     <TableRow key={item.id} className="text-stone-600">
                       <TableCell>
@@ -364,79 +418,109 @@ function LogsContent() {
               </div>
             ) : (
             <div className="space-y-4">
-              {/* 基础信息 */}
-              <div className="grid gap-3 rounded-xl border border-stone-200 bg-white p-4 text-sm text-stone-600 md:grid-cols-2">
-                {Object.entries(detailLog?.detail || {})
-                  .filter(([key, value]) => key !== "urls" && key !== "request_text" && typeof value !== "object")
-                  .map(([key, value]) => (
-                    <div key={key} className="flex items-start justify-between gap-4">
-                      <span className="text-stone-400">{key}</span>
-                      <span className="text-right font-medium break-all text-stone-700">{String(value)}</span>
-                    </div>
-                  ))}
+              <div className="grid overflow-hidden rounded-lg border border-stone-200 sm:grid-cols-2 lg:grid-cols-4">
+                {[
+                  ["接口", getDetailValue(detailLog, "endpoint")],
+                  ["模型", getDetailValue(detailLog, "model")],
+                  ["执行账号", getDetailValue(detailLog, "account_email")],
+                  ["状态", getStatus(detailLog || { id: "", time: "", type: "" })],
+                  ["调用耗时", formatDuration(detailLog || { id: "", time: "", type: "" })],
+                  ["开始时间", getDetailValue(detailLog, "started_at")],
+                  ["结束时间", getDetailValue(detailLog, "ended_at")],
+                  ["Key", getDetailValue(detailLog, "key_name")],
+                ].map(([label, value]) => (
+                  <div key={label} className="min-h-20 border-b border-r border-stone-100 px-4 py-3 last:border-r-0 sm:nth-[2n]:border-r-0 lg:nth-[4n]:border-r-0 lg:nth-last-[n+1]:border-b-0">
+                    <div className="text-xs text-stone-400">{label}</div>
+                    <div className="mt-1 truncate text-sm font-medium text-stone-800" title={value || "-"}>{value || "-"}</div>
+                  </div>
+                ))}
               </div>
 
-              {/* 请求内容 - 单独展示，支持展开/收起 */}
-              {detailLog?.detail?.request_text && (
-                <div className="rounded-xl border border-stone-200 bg-white">
-                  <div className="flex items-center justify-between border-b border-stone-100 px-4 py-3">
-                    <span className="text-sm font-medium text-stone-700">请求内容</span>
+              <div className="overflow-hidden rounded-lg border border-stone-200 bg-white">
+                <div className="flex border-b border-stone-100 px-3">
+                  {([
+                    ["result", "结果内容", ImageIcon],
+                    ["request", "请求内容", FileText],
+                    ["raw", "原始数据", Database],
+                  ] as const).map(([tab, label, Icon]) => (
                     <button
+                      key={tab}
                       type="button"
-                      className="text-xs text-stone-500 hover:text-stone-700"
-                      onClick={() => {
-                        const text = String(detailLog.detail?.request_text || "");
-                        navigator.clipboard.writeText(text);
-                        toast.success("已复制到剪贴板");
-                      }}
+                      className={`relative flex h-11 items-center gap-2 px-3 text-sm transition ${detailTab === tab ? "font-medium text-stone-900" : "text-stone-500 hover:text-stone-800"}`}
+                      onClick={() => setDetailTab(tab)}
+                      aria-selected={detailTab === tab}
                     >
-                      复制
-                    </button>
-                  </div>
-                  <div className="p-4">
-                    <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-all rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
-                      {String(detailLog.detail.request_text)}
-                    </pre>
-                  </div>
-                </div>
-              )}
-
-              {/* 图片 */}
-              {detailUrls.length ? (
-                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-3">
-                  {detailUrls.map((url, index) => (
-                    <button
-                      key={url}
-                      type="button"
-                      className="aspect-square overflow-hidden rounded-xl border border-stone-200 bg-stone-100"
-                      onClick={() => {
-                        setLightboxIndex(index);
-                        setLightboxOpen(true);
-                      }}
-                    >
-                      <img src={url} alt="" className="h-full w-full object-cover" />
+                      <Icon className="size-4" />
+                      {label}
+                      {detailTab === tab ? <span className="absolute inset-x-3 bottom-0 h-0.5 bg-stone-900" /> : null}
                     </button>
                   ))}
                 </div>
-              ) : null}
 
-              {/* 原始 JSON - 可折叠 */}
-              <div className="rounded-xl border border-stone-200 bg-white">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between px-4 py-3 text-left text-sm font-medium text-stone-700 hover:bg-stone-50"
-                  onClick={() => setShowRawJson(!showRawJson)}
-                >
-                  <span>原始数据</span>
-                  <ChevronRight className={`size-4 transition-transform ${showRawJson ? "rotate-90" : ""}`} />
-                </button>
-                {showRawJson && (
-                  <div className="border-t border-stone-100 p-4">
-                    <pre className="max-h-[400px] overflow-auto rounded-lg bg-stone-50 p-3 text-xs leading-relaxed text-stone-700">
+                {detailTab === "result" ? (
+                  <div className="space-y-5 p-4">
+                    {responseResult.text ? (
+                      <section className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-medium text-stone-800">最终结果</h3>
+                          <button
+                            type="button"
+                            className="inline-flex size-8 items-center justify-center rounded-md text-stone-500 hover:bg-stone-100 hover:text-stone-800"
+                            onClick={() => { void navigator.clipboard.writeText(responseResult.text); toast.success("已复制到剪贴板"); }}
+                            title="复制结果"
+                            aria-label="复制结果"
+                          >
+                            <Copy className="size-4" />
+                          </button>
+                        </div>
+                        <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                          {responseResult.text}
+                        </pre>
+                        {responseTextTruncated ? (
+                          <p className="text-xs leading-5 text-amber-700">返回内容已截断，日志仅保留前 12,000 个字符。</p>
+                        ) : null}
+                      </section>
+                    ) : responseImageUrls.length === 0 ? (
+                      <div className="py-12 text-center text-sm text-stone-400">该调用没有可展示的最终结果</div>
+                    ) : null}
+                    <DetailImageGallery title="返回图片" urls={responseImageUrls} onOpen={(index) => openImages(responseImageUrls, index)} />
+                  </div>
+                ) : null}
+
+                {detailTab === "request" ? (
+                  <div className="space-y-5 p-4">
+                    {getDetailValue(detailLog, "request_text") ? (
+                      <section className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h3 className="text-sm font-medium text-stone-800">请求文本</h3>
+                          <button
+                            type="button"
+                            className="inline-flex size-8 items-center justify-center rounded-md text-stone-500 hover:bg-stone-100 hover:text-stone-800"
+                            onClick={() => { const text = getDetailValue(detailLog, "request_text"); void navigator.clipboard.writeText(text); toast.success("已复制到剪贴板"); }}
+                            title="复制请求"
+                            aria-label="复制请求"
+                          >
+                            <Copy className="size-4" />
+                          </button>
+                        </div>
+                        <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                          {getDetailValue(detailLog, "request_text")}
+                        </pre>
+                      </section>
+                    ) : requestImageUrls.length === 0 ? (
+                      <div className="py-12 text-center text-sm text-stone-400">该调用没有记录请求内容</div>
+                    ) : null}
+                    <DetailImageGallery title="请求图片" urls={requestImageUrls} onOpen={(index) => openImages(requestImageUrls, index)} />
+                  </div>
+                ) : null}
+
+                {detailTab === "raw" ? (
+                  <div className="p-4">
+                    <pre className="max-h-[460px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-xs leading-5 text-stone-700">
                       {JSON.stringify(detailLog?.detail || {}, null, 2)}
                     </pre>
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
             )}
@@ -444,7 +528,7 @@ function LogsContent() {
         </DialogContent>
       </Dialog>
       <ImageLightbox
-        images={detailImages}
+        images={lightboxImages}
         currentIndex={lightboxIndex}
         open={lightboxOpen}
         onOpenChange={setLightboxOpen}
