@@ -246,6 +246,16 @@ class LoggedCallResponseTextTests(unittest.TestCase):
             ["http://app.test/images/response-output.png"],
         )
 
+    def test_collect_response_images_does_not_resave_base64_when_result_has_url(self) -> None:
+        existing_url = "http://app.test/images/already-saved.png"
+        with mock.patch("services.log_service.image_storage_service.save") as save:
+            urls = log_module.collect_response_image_urls({
+                "data": [{"url": existing_url, "b64_json": "ZmFrZS1pbWFnZQ=="}],
+            }, "http://app.test")
+
+        self.assertEqual(urls, [existing_url])
+        save.assert_not_called()
+
     def test_logged_call_records_responses_image_result_as_stable_url(self) -> None:
         stored = SimpleNamespace(url="http://app.test/images/responses-output.png")
         call = LoggedCall(

@@ -446,16 +446,20 @@ def collect_response_image_urls(result: object, base_url: str = "", response_tex
                 for item in data:
                     if not isinstance(item, dict):
                         continue
-                    _collect_request_image_url_value(urls, item.get("url"), base_url)
-                    _collect_request_base64_image_value(urls, item.get("b64_json"), base_url)
+                    url = item.get("url")
+                    _collect_request_image_url_value(urls, url, base_url)
+                    if not str(url or "").strip():
+                        _collect_request_base64_image_value(urls, item.get("b64_json"), base_url)
 
             output = result.get("output")
             if isinstance(output, list):
                 for item in output:
                     if not isinstance(item, dict) or str(item.get("type") or "") != "image_generation_call":
                         continue
-                    _collect_request_image_url_value(urls, item.get("url"), base_url)
-                    _collect_request_base64_image_value(urls, item.get("result"), base_url)
+                    url = item.get("url")
+                    _collect_request_image_url_value(urls, url, base_url)
+                    if not str(url or "").strip():
+                        _collect_request_base64_image_value(urls, item.get("result"), base_url)
 
             choices = result.get("choices")
             if isinstance(choices, list):
