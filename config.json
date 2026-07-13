@@ -2,6 +2,7 @@
   "auth-key": "chatgpt2api",
   "refresh_account_interval_minute": 5,
   "image_retention_days": 15,
+  "codex_image_quality": "auto",
   "image_poll_timeout_secs": 120,
   "auto_remove_rate_limited_accounts": false,
   "auto_remove_invalid_accounts": true,

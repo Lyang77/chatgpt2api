@@ -306,6 +306,11 @@ def _normalize_auth_key(value: object) -> str:
     return str(value or "").strip()
 
 
+def _normalize_codex_image_quality(value: object) -> str:
+    normalized = str(value or "auto").strip().lower()
+    return normalized if normalized in {"auto", "low", "medium", "high"} else "auto"
+
+
 def _is_invalid_auth_key(value: object) -> bool:
     return _normalize_auth_key(value) == ""
 
@@ -398,6 +403,10 @@ class ConfigStore:
             return "high"
         normalized = str(raw).strip().lower()
         return normalized if normalized in {"", "low", "medium", "high", "extended"} else "high"
+
+    @property
+    def codex_image_quality(self) -> str:
+        return _normalize_codex_image_quality(self.data.get("codex_image_quality"))
 
     @property
     def image_poll_timeout_secs(self) -> int:
@@ -559,6 +568,7 @@ class ConfigStore:
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
         data["image_thinking_effort"] = self.image_thinking_effort
+        data["codex_image_quality"] = self.codex_image_quality
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
@@ -604,6 +614,8 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
+        if "codex_image_quality" in next_data:
+            next_data["codex_image_quality"] = _normalize_codex_image_quality(next_data.get("codex_image_quality"))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

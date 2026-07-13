@@ -98,6 +98,45 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(updated["image_thinking_effort"], "medium")
             self.assertEqual(persisted["image_thinking_effort"], "medium")
 
+    def test_codex_image_quality_is_normalized_and_exposed(self) -> None:
+        module = self.config_module
+        missing = object()
+        cases = (
+            (missing, "auto"),
+            ("auto", "auto"),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            (" HIGH ", "high"),
+            ("unexpected", "auto"),
+        )
+
+        for raw_value, expected in cases:
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as tmp_dir:
+                config_path = Path(tmp_dir) / "config.json"
+                payload: dict[str, object] = {"auth-key": "test-auth"}
+                if raw_value is not missing:
+                    payload["codex_image_quality"] = raw_value
+                config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+                store = module.ConfigStore(config_path)
+
+                self.assertEqual(store.codex_image_quality, expected)
+                self.assertEqual(store.get()["codex_image_quality"], expected)
+
+    def test_codex_image_quality_update_is_normalized_and_persisted(self) -> None:
+        module = self.config_module
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = module.ConfigStore(config_path)
+
+            updated = store.update({"codex_image_quality": " HIGH "})
+
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["codex_image_quality"], "high")
+            self.assertEqual(persisted["codex_image_quality"], "high")
+
 
 if __name__ == "__main__":
     unittest.main()

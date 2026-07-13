@@ -5,11 +5,36 @@ import unittest
 from unittest import mock
 
 from services.openai_backend_api import OpenAIBackendAPI
+from services.config import config
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 from services.protocol.conversation import ImageOutput, stream_codex_image_outputs
 
 
 class CodexImageOutputFormatTests(unittest.TestCase):
+    def _codex_tool_payload(self, *, requested_quality: str, configured_quality: str) -> dict:
+        backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        backend.access_token = "token"
+        backend.base_url = "https://chatgpt.com"
+        backend._ensure_codex_source_account = mock.Mock()
+        backend._codex_image_input = mock.Mock(return_value=[])
+        backend._codex_responses_headers = mock.Mock(return_value={})
+        backend._iter_codex_response_events = mock.Mock(return_value=iter(()))
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+
+        with (
+            mock.patch.dict(config.data, {"codex_image_quality": configured_quality}),
+            mock.patch("services.openai_backend_api.urllib.request.urlopen", return_value=response) as urlopen,
+            mock.patch("services.openai_backend_api.account_service.get_account", return_value={}),
+            mock.patch("services.openai_backend_api.account_service._decode_jwt_payload", return_value={}),
+        ):
+            list(backend.iter_codex_image_response_events("generate", quality=requested_quality))
+
+        request = urlopen.call_args.args[0]
+        return json.loads(request.data.decode("utf-8"))["tools"][0]
+
     def test_image_protocols_copy_output_format_to_conversation_request(self):
         captured = []
 
@@ -115,6 +140,16 @@ class CodexImageOutputFormatTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["tools"][0]["output_format"], "jpeg")
+
+    def test_auto_codex_image_quality_keeps_request_value(self):
+        tool = self._codex_tool_payload(requested_quality="high", configured_quality="auto")
+
+        self.assertEqual(tool["quality"], "high")
+
+    def test_fixed_codex_image_quality_overrides_request_value(self):
+        tool = self._codex_tool_payload(requested_quality="low", configured_quality="medium")
+
+        self.assertEqual(tool["quality"], "medium")
 
     def test_codex_stream_reports_each_new_image_and_returns_all_results(self):
         first = "Zmlyc3Q="

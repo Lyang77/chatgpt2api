@@ -31,6 +31,7 @@ import {
   type SettingsConfig,
   type ThirdPartyAppsSettings,
 } from "@/lib/api";
+import { normalizeCodexImageQuality } from "@/lib/codex-image-quality";
 import { normalizeImageThinkingEffort } from "@/lib/image-thinking-effort";
 
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
@@ -169,6 +170,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
     image_retention_days: Number(config.image_retention_days || 30),
     image_thinking_effort: normalizeImageThinkingEffort(config.image_thinking_effort),
+    codex_image_quality: normalizeCodexImageQuality(config.codex_image_quality),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
@@ -290,6 +292,7 @@ type SettingsStore = {
   setRefreshAccountIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImageThinkingEffort: (value: string) => void;
+  setCodexImageQuality: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
   setImageSettleEnabled: (value: boolean) => void;
@@ -416,6 +419,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_thinking_effort: normalizeImageThinkingEffort(config.image_thinking_effort),
+        codex_image_quality: normalizeCodexImageQuality(config.codex_image_quality),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
@@ -519,6 +523,12 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   setImageThinkingEffort: (value) => {
     set((state) => state.config ? {
       config: { ...state.config, image_thinking_effort: normalizeImageThinkingEffort(value) },
+    } : {});
+  },
+
+  setCodexImageQuality: (value) => {
+    set((state) => state.config ? {
+      config: { ...state.config, codex_image_quality: normalizeCodexImageQuality(value) },
     } : {});
   },
 

@@ -765,6 +765,8 @@ class OpenAIBackendAPI:
             raise RuntimeError("access_token is required for codex image endpoints")
         self._ensure_codex_source_account()
         path = "/backend-api/codex/responses"
+        configured_quality = config.codex_image_quality
+        effective_quality = str(quality or "auto") if configured_quality == "auto" else configured_quality
         payload = {
             "model": CODEX_RESPONSES_MODEL,
             "instructions": CODEX_RESPONSES_INSTRUCTIONS,
@@ -775,7 +777,7 @@ class OpenAIBackendAPI:
                 "model": "gpt-image-2",
                 "action": "edit" if images else "generate",
                 "size": str(size or "1024x1024"),
-                "quality": str(quality or "auto"),
+                "quality": effective_quality,
                 "output_format": str(output_format or "png"),
             }],
             "tool_choice": {"type": "image_generation"},

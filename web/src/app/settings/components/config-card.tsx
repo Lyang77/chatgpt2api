@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import type { ImageStorageMode } from "@/lib/api";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { CODEX_IMAGE_QUALITY_OPTIONS } from "@/lib/codex-image-quality";
 import { IMAGE_THINKING_EFFORT_OPTIONS } from "@/lib/image-thinking-effort";
 
 import { useSettingsStore } from "../store";
@@ -26,6 +27,7 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImageThinkingEffort = useSettingsStore((state) => state.setImageThinkingEffort);
+  const setCodexImageQuality = useSettingsStore((state) => state.setCodexImageQuality);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageSettleEnabled = useSettingsStore((state) => state.setImageSettleEnabled);
@@ -187,6 +189,27 @@ export function ConfigCard() {
             </Select>
             <p className="text-xs text-stone-500">
               仅影响 gpt-image-2 的 gpt-5-3 + picture_v2 Web 链路；关闭时不发送思考参数。
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">Codex 生图质量</label>
+            <Select
+              value={String(config?.codex_image_quality || "auto")}
+              onValueChange={setCodexImageQuality}
+            >
+              <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white shadow-none">
+                <SelectValue placeholder="自动" />
+              </SelectTrigger>
+              <SelectContent>
+                {CODEX_IMAGE_QUALITY_OPTIONS.map((option) => (
+                  <SelectItem key={option.value} value={option.value}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-stone-500">
+              仅影响 codex-gpt-image-2；选择低、中或高时会覆盖 API 请求中的 quality。
             </p>
           </div>
           <div className="space-y-2">
