@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 from uuid import uuid4
 
-from api.image_inputs import parse_image_edit_request, read_image_sources
+from api.image_inputs import deduplicate_image_inputs, parse_image_edit_request, read_image_sources
 from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
@@ -159,7 +159,7 @@ def create_router() -> APIRouter:
             image_base_url=image_base_url,
         )
         await filter_or_log(call, prompt)
-        images = await read_image_sources(image_sources)
+        images = deduplicate_image_inputs(await read_image_sources(image_sources))
         payload["images"] = images
         request_urls = collect_request_image_input_urls(images, image_base_url)
         if mask_sources:

@@ -95,6 +95,46 @@ class ImageEditsJsonApiTests(unittest.TestCase):
             (b"fake-jpeg", "image_url.jpg", "image/jpeg"),
         ])
 
+    def test_image_edit_deduplicates_identical_image_bytes(self):
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            json={
+                "prompt": "同一商品图只保留一份参考",
+                "images": [
+                    PNG_DATA_URL,
+                    {
+                        "b64_json": base64.b64encode(b"fake-png").decode("ascii"),
+                        "mime_type": "image/png",
+                        "filename": "duplicate.png",
+                    },
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self.calls[0]["images"],
+            [(b"fake-png", "image_url.png", "image/png")],
+        )
+
+    def test_image_edit_deduplicates_identical_multipart_images(self):
+        response = self.client.post(
+            "/v1/images/edits",
+            headers=AUTH_HEADERS,
+            data={"prompt": "multipart 相同商品图只保留一份"},
+            files=[
+                ("image", ("first.png", b"same-image", "image/png")),
+                ("image", ("duplicate.png", b"same-image", "image/png")),
+            ],
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            self.calls[0]["images"],
+            [(b"same-image", "first.png", "image/png")],
+        )
+
     def test_image_edit_keeps_original_multipart_multiple_image_logic(self):
         response = self.client.post(
             "/v1/images/edits",

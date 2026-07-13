@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import mimetypes
 import re
@@ -58,6 +59,19 @@ def _parse_count(value: object) -> int:
     if count < 1 or count > 4:
         raise HTTPException(status_code=400, detail={"error": "n must be between 1 and 4"})
     return count
+
+
+def deduplicate_image_inputs(images: list[ImageInput]) -> list[ImageInput]:
+    """保留首个文件，移除内容完全相同的重复图片输入。"""
+    unique_images: list[ImageInput] = []
+    seen_content_hashes: set[bytes] = set()
+    for image in images:
+        content_hash = hashlib.sha256(image[0]).digest()
+        if content_hash in seen_content_hashes:
+            continue
+        seen_content_hashes.add(content_hash)
+        unique_images.append(image)
+    return unique_images
 
 
 def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
