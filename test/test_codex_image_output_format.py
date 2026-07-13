@@ -30,11 +30,14 @@ class CodexImageOutputFormatTests(unittest.TestCase):
             "stream_image_outputs_with_pool",
             fake_stream,
         ):
+            generation_callback = mock.Mock()
             openai_v1_image_generations.handle(
                 {
                     "model": "codex-gpt-image-2",
                     "prompt": "generate",
                     "output_format": "jpeg",
+                    "image_result_callback": generation_callback,
+                    "wait_for_image_terminal": True,
                 }
             )
 
@@ -53,6 +56,8 @@ class CodexImageOutputFormatTests(unittest.TestCase):
             )
 
         self.assertEqual([request.output_format for request in captured], ["jpeg", "webp"])
+        self.assertIs(captured[0].image_result_callback, generation_callback)
+        self.assertTrue(captured[0].wait_for_image_terminal)
 
     def test_codex_stream_forwards_output_format_to_backend(self):
         backend = mock.Mock()
@@ -110,6 +115,34 @@ class CodexImageOutputFormatTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["tools"][0]["output_format"], "jpeg")
+
+    def test_codex_stream_reports_each_new_image_and_returns_all_results(self):
+        first = "Zmlyc3Q="
+        second = "c2Vjb25k"
+        backend = mock.Mock()
+        backend.iter_codex_image_response_events.return_value = [
+            {"type": "response.output_item.done", "item": {"type": "image_generation_call", "result": first}},
+            {"type": "response.output_item.done", "item": {"type": "image_generation_call", "result": second}},
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        received = []
+        request = mock.Mock(
+            prompt="draw variants",
+            images=[],
+            size="1024x1024",
+            quality="auto",
+            output_format="png",
+            response_format="b64_json",
+            base_url=None,
+            model="codex-gpt-image-2",
+            image_result_callback=lambda items: received.extend(items),
+        )
+
+        outputs = list(stream_codex_image_outputs(backend, request))
+
+        self.assertEqual([item["b64_json"] for item in received], [first, second])
+        self.assertEqual([item["b64_json"] for item in outputs[0].data], [first, second])
+        self.assertEqual(outputs[0].completion_reason, "upstream_completed")
 
 
 if __name__ == "__main__":

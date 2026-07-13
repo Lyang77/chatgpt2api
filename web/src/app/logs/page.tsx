@@ -17,6 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, stopSystemLog, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { extractLogResultContent } from "@/lib/log-detail-content";
+import { getImageLogSummary } from "@/lib/image-log-summary";
 
 const LogType = {
   Call: "call",
@@ -135,6 +136,7 @@ function LogsContent() {
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
   const responseImageUrls = getResponseImageUrls(detailLog);
   const requestImageUrls = getRequestImageUrls(detailLog);
+  const imageLogSummary = getImageLogSummary(detailLog?.detail);
   const responseResult = useMemo(
     () => extractLogResultContent(detailLog?.detail?.response_text),
     [detailLog],
@@ -513,6 +515,16 @@ function LogsContent() {
 
                 {detailTab === "result" ? (
                   <div className="space-y-5 p-4">
+                    {imageLogSummary ? (
+                      <section className="rounded-lg border border-stone-200 bg-stone-50 px-4 py-3">
+                        <div className="text-sm font-medium text-stone-800">
+                          实际返回数量：{imageLogSummary.actualCount}
+                        </div>
+                        {imageLogSummary.warning ? (
+                          <p className="mt-1 text-xs leading-5 text-amber-700">{imageLogSummary.warning}</p>
+                        ) : null}
+                      </section>
+                    ) : null}
                     {responseResult.text ? (
                       <section className="space-y-3">
                         <div className="flex items-center justify-between gap-3">

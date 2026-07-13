@@ -5,12 +5,25 @@ import unittest
 from unittest import mock
 
 from services.config import config
-from services.openai_backend_api import OpenAIBackendAPI
-from services.protocol.conversation import ImageOutput, extract_conversation_ids
+from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
+from services.protocol.conversation import (
+    ConversationRequest,
+    ImageOutput,
+    _generate_single_image,
+    extract_conversation_ids,
+    stream_image_outputs,
+)
 from services.protocol.openai_v1_response import stream_image_response
 
 
-def _conversation(file_ids: list[str], sediment_ids: list[str] | None = None) -> dict:
+def _conversation(
+        file_ids: list[str],
+        sediment_ids: list[str] | None = None,
+        *,
+        status: str = "",
+        end_turn: bool = False,
+        is_error: bool = False,
+) -> dict:
     parts: list[object] = [
         {"content_type": "image_asset_pointer", "asset_pointer": f"file-service://{file_id}"}
         for file_id in file_ids
@@ -22,8 +35,10 @@ def _conversation(file_ids: list[str], sediment_ids: list[str] | None = None) ->
                 "message": {
                     "author": {"role": "tool"},
                     "create_time": 1,
-                    "metadata": {"async_task_type": "image_gen"},
+                    "metadata": {"async_task_type": "image_gen", "is_error": is_error},
                     "content": {"content_type": "multimodal_text", "parts": parts},
+                    "status": status,
+                    "end_turn": end_turn,
                 }
             }
         }
@@ -119,7 +134,12 @@ class MultiImageResultTests(unittest.TestCase):
         ])
 
         with (
-            mock.patch.dict(config.data, {"image_poll_initial_wait_secs": 0, "image_poll_interval_secs": 0.5}),
+            mock.patch.dict(config.data, {
+                "image_poll_initial_wait_secs": 0,
+                "image_poll_interval_secs": 0.5,
+                "image_check_before_hit_enabled": True,
+                "image_settle_enabled": True,
+            }),
             mock.patch("services.openai_backend_api.time.sleep", lambda _seconds: None),
         ):
             file_ids, sediment_ids = backend._poll_image_results("conv-1", timeout_secs=10)
@@ -127,6 +147,66 @@ class MultiImageResultTests(unittest.TestCase):
         self.assertEqual(file_ids, ["file-one", "file-two"])
         self.assertEqual(sediment_ids, ["sed-one"])
         self.assertEqual(backend.calls, 3)
+
+    def test_strict_poll_waits_for_image_terminal_state(self) -> None:
+        backend = FakeBackend([
+            _conversation(["file-one"], status="in_progress"),
+            _conversation(["file-one"], status="in_progress"),
+            _conversation(
+                ["file-one", "file-two"],
+                ["sed-one"],
+                status="finished_successfully",
+                end_turn=True,
+            ),
+        ])
+        snapshots: list[tuple[list[str], list[str]]] = []
+
+        with (
+            mock.patch.dict(config.data, {
+                "image_poll_initial_wait_secs": 0,
+                "image_poll_interval_secs": 0.5,
+                "image_check_before_hit_enabled": False,
+                "image_settle_enabled": False,
+            }),
+            mock.patch("services.openai_backend_api.time.sleep", lambda _seconds: None),
+        ):
+            file_ids, sediment_ids = backend._poll_image_results(
+                "conv-1",
+                timeout_secs=10,
+                wait_for_terminal=True,
+                result_ids_callback=lambda files, sediments: snapshots.append(
+                    (list(files), list(sediments))
+                ),
+            )
+
+        self.assertEqual(file_ids, ["file-one", "file-two"])
+        self.assertEqual(sediment_ids, ["sed-one"])
+        self.assertEqual(snapshots, [
+            (["file-one"], []),
+            (["file-one", "file-two"], ["sed-one"]),
+        ])
+        self.assertEqual(backend.calls, 3)
+
+    def test_image_terminal_state_detects_failure(self) -> None:
+        backend = FakeBackend()
+
+        state = backend._image_generation_terminal_state(
+            _conversation([], status="failed", end_turn=True, is_error=True)
+        )
+
+        self.assertEqual(state, "failed")
+
+    def test_image_terminal_state_does_not_finish_while_an_image_message_is_running(self) -> None:
+        backend = FakeBackend()
+        conversation = _conversation(["file-one"], status="finished_successfully", end_turn=True)
+        conversation["mapping"]["running"] = _conversation(
+            ["file-two"],
+            status="in_progress",
+        )["mapping"]["tool"]
+
+        state = backend._image_generation_terminal_state(conversation)
+
+        self.assertEqual(state, "")
 
     def test_resolver_uses_file_and_sediment_urls(self) -> None:
         backend = FakeBackend()
@@ -143,6 +223,104 @@ class MultiImageResultTests(unittest.TestCase):
             "https://attachments.test/one.png",
             "https://attachments.test/two.png",
         ])
+
+    def test_strict_resolver_reports_incremental_url_snapshots(self) -> None:
+        backend = FakeBackend([
+            _conversation(["file-one"], status="in_progress"),
+            _conversation(["file-one", "file-two"], status="finished_successfully", end_turn=True),
+        ])
+        backend.file_urls = {
+            "file-one": "https://files.test/one.png",
+            "file-two": "https://files.test/two.png",
+        }
+        snapshots: list[list[str]] = []
+
+        with (
+            mock.patch.dict(config.data, {
+                "image_poll_initial_wait_secs": 0,
+                "image_poll_interval_secs": 0.5,
+                "image_check_before_hit_enabled": False,
+                "image_settle_enabled": False,
+            }),
+            mock.patch("services.openai_backend_api.time.sleep", lambda _seconds: None),
+        ):
+            urls = backend.resolve_conversation_image_urls(
+                "conv-1",
+                [],
+                [],
+                wait_for_terminal=True,
+                result_urls_callback=lambda items: snapshots.append(list(items)),
+            )
+
+        self.assertEqual(urls, ["https://files.test/one.png", "https://files.test/two.png"])
+        self.assertEqual(snapshots, [
+            ["https://files.test/one.png"],
+            ["https://files.test/one.png", "https://files.test/two.png"],
+        ])
+
+    def test_text_reply_poll_uses_configured_timeout(self) -> None:
+        backend = mock.Mock()
+        backend.resolve_conversation_image_urls.return_value = ["https://files.test/one.png"]
+        backend.download_image_bytes.return_value = [b"one"]
+        final_event = {
+            "type": "conversation.done",
+            "conversation_id": "conv-1",
+            "file_ids": [],
+            "sediment_ids": [],
+            "text": '{"referenced_image_ids":["file-one"]}',
+            "turn_use_case": "image gen",
+        }
+
+        with (
+            mock.patch.dict(config.data, {"image_poll_timeout_secs": 17}),
+            mock.patch(
+                "services.protocol.conversation.conversation_events",
+                return_value=iter([final_event]),
+            ),
+            mock.patch(
+                "services.protocol.conversation._get_detailed_error_from_tasks",
+                return_value="",
+            ),
+        ):
+            outputs = list(stream_image_outputs(
+                backend,
+                ConversationRequest(prompt="draw variants", response_format="b64_json"),
+            ))
+
+        self.assertTrue(any(output.kind == "result" for output in outputs))
+        self.assertEqual(
+            backend.resolve_conversation_image_urls.call_args.kwargs["poll_timeout_secs"],
+            17,
+        )
+
+    def test_strict_task_poll_timeout_does_not_start_second_upstream_request(self) -> None:
+        request = ConversationRequest(
+            prompt="draw variants",
+            model="gpt-image-2",
+            wait_for_image_terminal=True,
+        )
+
+        with (
+            mock.patch(
+                "services.protocol.conversation.account_service.get_available_access_token",
+                return_value="token-1",
+            ) as select_account,
+            mock.patch(
+                "services.protocol.conversation.account_service.get_account",
+                return_value={"email": "one@example.test"},
+            ),
+            mock.patch("services.protocol.conversation.account_service.mark_image_result"),
+            mock.patch("services.protocol.conversation.OpenAIBackendAPI") as backend_class,
+            mock.patch(
+                "services.protocol.conversation.stream_image_outputs",
+                side_effect=ImagePollTimeoutError("timed out"),
+            ),
+        ):
+            with self.assertRaises(ImagePollTimeoutError):
+                _generate_single_image(request, 1, 1)
+
+        self.assertEqual(select_account.call_count, 1)
+        self.assertEqual(backend_class.call_count, 1)
 
     def test_resolver_keeps_stream_ids_when_poll_extension_fails(self) -> None:
         backend = FakeBackend()

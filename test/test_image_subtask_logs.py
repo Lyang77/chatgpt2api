@@ -93,6 +93,36 @@ class ImageTaskRegistryTests(unittest.TestCase):
 
         mark.assert_called_once_with("token-1", False)
 
+    def test_completed_subtask_log_records_actual_image_count(self) -> None:
+        request = conversation.ConversationRequest(
+            model="gpt-image-2",
+            prompt="draw variants",
+            image_task_log_template={"endpoint": "/v1/images/generations"},
+            image_task_batch_id="batch-1",
+        )
+        context = mock.Mock(log_id="log-1")
+        outputs = [conversation.ImageOutput(
+            kind="result",
+            model="gpt-image-2",
+            index=1,
+            total=1,
+            data=[{"url": "/one.png"}, {"url": "/two.png"}],
+            completion_reason="upstream_completed",
+        )]
+
+        with (
+            mock.patch.object(conversation, "create_image_task_log_context", return_value=context),
+            mock.patch.object(conversation, "_generate_single_image_with_context", return_value=outputs),
+            mock.patch.object(conversation, "_update_image_task_log") as update_log,
+            mock.patch.object(conversation.image_task_registry, "unregister"),
+        ):
+            result = conversation._generate_single_image(request, 1, 1)
+
+        self.assertEqual(result, outputs)
+        final_call = update_log.call_args_list[-1]
+        self.assertEqual(final_call.kwargs["actual_image_count"], 2)
+        self.assertEqual(final_call.kwargs["completion_reason"], "upstream_completed")
+
 
 if __name__ == "__main__":
     unittest.main()

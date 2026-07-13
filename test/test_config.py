@@ -58,6 +58,46 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
+    def test_image_thinking_effort_is_normalized_and_exposed(self) -> None:
+        module = self.config_module
+        missing = object()
+        cases = (
+            (missing, "high"),
+            ("", ""),
+            ("low", "low"),
+            ("medium", "medium"),
+            ("high", "high"),
+            ("extended", "extended"),
+            (" HIGH ", "high"),
+            ("unexpected", "high"),
+        )
+
+        for raw_value, expected in cases:
+            with self.subTest(raw_value=raw_value), tempfile.TemporaryDirectory() as tmp_dir:
+                config_path = Path(tmp_dir) / "config.json"
+                payload: dict[str, object] = {"auth-key": "test-auth"}
+                if raw_value is not missing:
+                    payload["image_thinking_effort"] = raw_value
+                config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+                store = module.ConfigStore(config_path)
+
+                self.assertEqual(store.image_thinking_effort, expected)
+                self.assertEqual(store.get()["image_thinking_effort"], expected)
+
+    def test_image_thinking_effort_update_is_persisted(self) -> None:
+        module = self.config_module
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+            store = module.ConfigStore(config_path)
+
+            updated = store.update({"image_thinking_effort": "medium"})
+
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["image_thinking_effort"], "medium")
+            self.assertEqual(persisted["image_thinking_effort"], "medium")
+
 
 if __name__ == "__main__":
     unittest.main()

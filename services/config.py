@@ -392,6 +392,14 @@ class ConfigStore:
             return 30
 
     @property
+    def image_thinking_effort(self) -> str:
+        raw = self.data.get("image_thinking_effort")
+        if raw is None:
+            return "high"
+        normalized = str(raw).strip().lower()
+        return normalized if normalized in {"", "low", "medium", "high", "extended"} else "high"
+
+    @property
     def image_poll_timeout_secs(self) -> int:
         try:
             return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
@@ -550,6 +558,7 @@ class ConfigStore:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["image_thinking_effort"] = self.image_thinking_effort
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs

@@ -11,6 +11,7 @@ from typing import Any
 from services.config import DATA_DIR, config
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
+from services.openai_backend_api import ImagePollTimeoutError
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
 
 TASK_STATUS_QUEUED = "queued"
@@ -61,6 +62,31 @@ def _collect_image_urls(data: list[Any]) -> list[str]:
     return urls
 
 
+def _image_result_key(item: dict[str, Any]) -> str:
+    url = _clean(item.get("url"))
+    if url:
+        return f"url:{url}"
+    b64_json = _clean(item.get("b64_json"))
+    if b64_json:
+        return f"b64:{b64_json}"
+    return "json:" + json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _merge_image_data(existing: list[Any], incoming: list[Any]) -> list[dict[str, Any]]:
+    merged = [dict(item) for item in existing if isinstance(item, dict)]
+    seen = {_image_result_key(item) for item in merged}
+    for item in incoming:
+        if not isinstance(item, dict):
+            continue
+        value = dict(item)
+        key = _image_result_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(value)
+    return merged
+
+
 def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     item = {
         "id": task.get("id"),
@@ -76,6 +102,9 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         item["conversation_id"] = task.get("conversation_id")
     if task.get("data") is not None:
         item["data"] = task.get("data")
+    item["actual_image_count"] = len(task.get("data") or [])
+    if task.get("completion_reason"):
+        item["completion_reason"] = task.get("completion_reason")
     if task.get("usage") is not None:
         item["usage"] = task.get("usage")
     if task.get("error"):
@@ -133,11 +162,11 @@ class ImageTaskService:
         payload = {
             "prompt": prompt,
             "model": model,
-            "n": 1,
             "size": size,
             "quality": quality,
             "response_format": "url",
             "base_url": base_url,
+            "wait_for_image_terminal": True,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
 
@@ -159,11 +188,11 @@ class ImageTaskService:
             "images": images or [],
             "mask": masks or [],
             "model": model,
-            "n": 1,
             "size": size,
             "quality": quality,
             "response_format": "url",
             "base_url": base_url,
+            "wait_for_image_terminal": True,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)
 
@@ -224,6 +253,8 @@ class ImageTaskService:
                 "created_at": now,
                 "updated_at": now,
                 "created_ts": time.time(),
+                "data": [],
+                "actual_image_count": 0,
             }
             self._tasks[key] = task
             self._save_locked()
@@ -238,6 +269,24 @@ class ImageTaskService:
             )
             thread.start()
         return _public_task(task)
+
+    def _append_task_data(self, key: str, items: list[Any]) -> list[dict[str, Any]]:
+        with self._lock:
+            task = self._tasks.get(key)
+            if task is None:
+                return []
+            merged = _merge_image_data(task.get("data") or [], items)
+            task["data"] = merged
+            task["actual_image_count"] = len(merged)
+            task["updated_at"] = _now_iso()
+            task["updated_ts"] = time.time()
+            self._save_locked()
+            return [dict(item) for item in merged]
+
+    def _task_data(self, key: str) -> list[dict[str, Any]]:
+        with self._lock:
+            task = self._tasks.get(key) or {}
+            return [dict(item) for item in (task.get("data") or []) if isinstance(item, dict)]
 
     def _run_task(
         self,
@@ -254,8 +303,14 @@ class ImageTaskService:
             if step == "image_stream_resolve_start":
                 self._update_task(key, started_ts=time.time())
             self._update_task(key, progress=step)
+        def image_result_callback(items: list[dict[str, Any]]) -> None:
+            self._append_task_data(key, items)
         # 将进度回调添加到 payload 中（handler 会提取并传递给 ConversationRequest）
-        payload_with_progress = {**payload, "progress_callback": progress_callback}
+        payload_with_progress = {
+            **payload,
+            "progress_callback": progress_callback,
+            "image_result_callback": image_result_callback,
+        }
         try:
             handler = self.edit_handler if mode == "edit" else self.generation_handler
             result = handler(payload_with_progress)
@@ -263,7 +318,8 @@ class ImageTaskService:
                 raise RuntimeError("image task returned streaming result unexpectedly")
             data = result.get("data")
             account_email = _clean(result.get("_account_email") or result.get("account_email"))
-            if not isinstance(data, list) or not data:
+            merged_data = self._append_task_data(key, data if isinstance(data, list) else [])
+            if not merged_data:
                 upstream = _clean(result.get("message"))
                 if upstream:
                     message = upstream
@@ -274,8 +330,18 @@ class ImageTaskService:
                     setattr(error, "account_email", account_email)
                 raise error
             usage = result.get("usage")
+            completion_reason = _clean(result.get("_completion_reason"), "upstream_completed")
             duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, usage=usage, error="", duration_ms=duration_ms)
+            self._update_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                data=merged_data,
+                actual_image_count=len(merged_data),
+                completion_reason=completion_reason,
+                usage=usage,
+                error="",
+                duration_ms=duration_ms,
+            )
             self._log_call(
                 identity,
                 mode,
@@ -283,28 +349,71 @@ class ImageTaskService:
                 started,
                 "调用完成",
                 request_preview=request_text(payload.get("prompt")),
-                urls=_collect_image_urls(data),
+                urls=_collect_image_urls(merged_data),
                 account_email=account_email,
+                actual_image_count=len(merged_data),
+                completion_reason=completion_reason,
             )
+        except ImagePollTimeoutError as exc:
+            merged_data = self._task_data(key)
+            if merged_data:
+                duration_ms = int((time.time() - started) * 1000)
+                self._update_task(
+                    key,
+                    status=TASK_STATUS_SUCCESS,
+                    actual_image_count=len(merged_data),
+                    completion_reason="timeout_with_results",
+                    error="",
+                    duration_ms=duration_ms,
+                )
+                self._log_call(
+                    identity,
+                    mode,
+                    model,
+                    started,
+                    "调用完成",
+                    request_preview=request_text(payload.get("prompt")),
+                    urls=_collect_image_urls(merged_data),
+                    account_email=_clean(getattr(exc, "account_email", "")),
+                    actual_image_count=len(merged_data),
+                    completion_reason="timeout_with_results",
+                )
+                return
+            self._finish_task_error(key, identity, mode, model, started, payload, exc)
         except Exception as exc:
-            error_message = str(exc) or "image task failed"
-            account_email = _clean(getattr(exc, "account_email", ""))
-            conversation_id = _clean(getattr(exc, "conversation_id", ""))
-            duration_ms = int((time.time() - started) * 1000)
-            self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
-                              duration_ms=duration_ms,
-                              **({"conversation_id": conversation_id} if conversation_id else {}))
-            self._log_call(
-                identity,
-                mode,
-                model,
-                started,
-                "调用失败",
-                request_preview=request_text(payload.get("prompt")),
-                status="failed",
-                error=error_message,
-                account_email=account_email,
-            )
+            self._finish_task_error(key, identity, mode, model, started, payload, exc)
+
+    def _finish_task_error(
+        self,
+        key: str,
+        identity: dict[str, object],
+        mode: str,
+        model: str,
+        started: float,
+        payload: dict[str, Any],
+        exc: Exception,
+    ) -> None:
+        error_message = str(exc) or "image task failed"
+        account_email = _clean(getattr(exc, "account_email", ""))
+        conversation_id = _clean(getattr(exc, "conversation_id", ""))
+        duration_ms = int((time.time() - started) * 1000)
+        self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
+                          actual_image_count=0, completion_reason="failed",
+                          duration_ms=duration_ms,
+                          **({"conversation_id": conversation_id} if conversation_id else {}))
+        self._log_call(
+            identity,
+            mode,
+            model,
+            started,
+            "调用失败",
+            request_preview=request_text(payload.get("prompt")),
+            status="failed",
+            error=error_message,
+            account_email=account_email,
+            actual_image_count=0,
+            completion_reason="failed",
+        )
 
     def _log_call(
         self,
@@ -319,6 +428,8 @@ class ImageTaskService:
         error: str = "",
         urls: list[str] | None = None,
         account_email: str = "",
+        actual_image_count: int = 0,
+        completion_reason: str = "",
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -332,7 +443,10 @@ class ImageTaskService:
             "ended_at": _now_iso(),
             "duration_ms": int((time.time() - started) * 1000),
             "status": status,
+            "actual_image_count": actual_image_count,
         }
+        if completion_reason:
+            detail["completion_reason"] = completion_reason
         if request_preview:
             detail["request_text"] = request_preview
         if error:
@@ -341,6 +455,7 @@ class ImageTaskService:
             detail["account_email"] = account_email
         if urls:
             detail["urls"] = list(dict.fromkeys(urls))
+            detail["response_image_urls"] = list(dict.fromkeys(urls))
         try:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:
@@ -394,7 +509,13 @@ class ImageTaskService:
             }
             data = item.get("data")
             if isinstance(data, list):
-                task["data"] = data
+                task["data"] = _merge_image_data([], data)
+            else:
+                task["data"] = []
+            task["actual_image_count"] = len(task["data"])
+            completion_reason = _clean(item.get("completion_reason"))
+            if completion_reason:
+                task["completion_reason"] = completion_reason
             usage = item.get("usage")
             if isinstance(usage, dict):
                 task["usage"] = usage
@@ -487,39 +608,61 @@ class ImageTaskService:
             from services.openai_backend_api import OpenAIBackendAPI
             from services.protocol.conversation import format_image_result
 
-            backend = OpenAIBackendAPI(proxy_url=config.proxy_url or None)
+            backend = OpenAIBackendAPI(proxy_url=config.get_proxy_settings() or None)
+            reported_urls: set[str] = set()
+
+            def consume_result_ids(file_ids: list[str], sediment_ids: list[str]) -> None:
+                try:
+                    urls = backend._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+                    new_urls = [url for url in urls if url and url not in reported_urls]
+                    if not new_urls:
+                        return
+                    image_items = [
+                        {"b64_json": __import__("base64").b64encode(image_data).decode("ascii")}
+                        for image_data in backend.download_image_bytes(new_urls)
+                    ]
+                    data = format_image_result(
+                        image_items,
+                        "",
+                        "b64_json",
+                        "",
+                        int(time.time()),
+                    )["data"]
+                    if data:
+                        self._append_task_data(key, data)
+                        reported_urls.update(new_urls)
+                except Exception:
+                    # 资源地址可能先出现、稍后才可下载；终态后的最后一次解析仍会重试。
+                    return
+
             file_ids, sediment_ids = backend._poll_image_results(
                 conversation_id,
                 extra_timeout_secs,
+                wait_for_terminal=True,
+                result_ids_callback=consume_result_ids,
             )
             if not file_ids and not sediment_ids:
                 raise RuntimeError(
                     f"继续等待 {extra_timeout_secs} 秒后仍未找到图片结果。"
                 )
 
-            image_urls = backend.resolve_conversation_image_urls(
-                conversation_id, file_ids, sediment_ids, poll=False,
-            )
-            if not image_urls:
+            consume_result_ids(file_ids, sediment_ids)
+            data = self._task_data(key)
+            if not data:
                 raise RuntimeError("图片 URL 解析失败")
-
-            image_items = [
-                {"b64_json": __import__("base64").b64encode(image_data).decode("ascii")}
-                for image_data in backend.download_image_bytes(image_urls)
-            ]
-            # 获取 task 的原始 prompt（从 _public_task 的 mode 判断）
-            with self._lock:
-                task = self._tasks.get(key)
-                quality = _clean(task.get("quality"), "auto") if task else "auto"
-                size = _clean(task.get("size")) if task else None
-            data = format_image_result(
-                image_items,
-                "",  # prompt 已不重要，结果已经拿到了
-                "b64_json",
-                "",
-                int(time.time()),
-            )["data"]
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="", duration_ms=int((time.time() - started) * 1000))
+            completion_reason = _clean(
+                getattr(backend, "last_image_completion_reason", ""),
+                "upstream_completed",
+            )
+            self._update_task(
+                key,
+                status=TASK_STATUS_SUCCESS,
+                data=data,
+                actual_image_count=len(data),
+                completion_reason=completion_reason,
+                error="",
+                duration_ms=int((time.time() - started) * 1000),
+            )
             self._log_call(
                 identity,
                 mode,
@@ -528,6 +671,8 @@ class ImageTaskService:
                 "调用完成（续轮询）",
                 status="success",
                 urls=_collect_image_urls(data),
+                actual_image_count=len(data),
+                completion_reason=completion_reason,
             )
         except Exception as exc:
             error_message = str(exc) or "resume poll failed"

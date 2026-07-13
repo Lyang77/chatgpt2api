@@ -92,8 +92,8 @@ REAL_IMAGE_FILE_ID_RE = re.compile(r"\bfile_00000000[a-f0-9]{24}\b")
 SEDIMENT_ID_RE = re.compile(r"sediment://([A-Za-z0-9_-]+)")
 IMAGE_POLL_SETTLE_SECS = 2.0
 CODEX_RESPONSES_INSTRUCTIONS = (
-    "Use the image_generation tool to create exactly one image for the user's request. "
-    "Return the generated image result."
+    "Use the image_generation tool to fulfill the user's image request. "
+    "Return every generated image result."
 )
 
 # 内容政策违规错误关键词（上游拒绝生成图片的各种表述）
@@ -865,6 +865,9 @@ class OpenAIBackendAPI:
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
         }
+        thinking_effort = config.image_thinking_effort
+        if thinking_effort:
+            payload["thinking_effort"] = thinking_effort
         response = self.session.post(
             self.base_url + path,
             headers=self._image_headers(path, requirements),
@@ -1010,6 +1013,9 @@ class OpenAIBackendAPI:
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
         }
+        thinking_effort = config.image_thinking_effort
+        if thinking_effort:
+            payload["thinking_effort"] = thinking_effort
         path = "/backend-api/f/conversation"
         response = self.session.post(
             self.base_url + path,
@@ -2067,6 +2073,29 @@ class OpenAIBackendAPI:
                  "sediment_ids": sediment_ids})
         return sorted(records, key=lambda item: item["create_time"])
 
+    def _image_generation_terminal_state(self, data: Dict[str, Any]) -> str:
+        """Return the terminal state of image tool messages in a conversation."""
+        success_statuses = {"finished_successfully", "finished_partial_completion", "completed"}
+        failed_statuses = {"failed", "cancelled", "expired"}
+        state = ""
+        has_explicit_pending = False
+        for node in (data.get("mapping") or {}).values():
+            message = (node or {}).get("message") or {}
+            metadata = message.get("metadata") or {}
+            content = message.get("content") or {}
+            is_image_gen = metadata.get("async_task_type") == "image_gen"
+            has_asset_pointer = self._has_image_asset_pointer(content) or self._has_image_asset_pointer(metadata)
+            if not is_image_gen and not has_asset_pointer:
+                continue
+            status = str(message.get("status") or "").strip().lower()
+            if metadata.get("is_error") is True or status in failed_statuses:
+                return "failed"
+            if status in success_statuses or message.get("end_turn") is True:
+                state = "success"
+            elif status:
+                has_explicit_pending = True
+        return "" if has_explicit_pending else state
+
     @staticmethod
     def _find_content_policy_error_in_conversation(data: Dict[str, Any]) -> str:
         """从对话文档中查找内容政策违规错误消息。
@@ -2107,6 +2136,8 @@ class OpenAIBackendAPI:
             timeout_secs: float = 120.0,
             initial_file_ids: list[str] | None = None,
             initial_sediment_ids: list[str] | None = None,
+            wait_for_terminal: bool = False,
+            result_ids_callback: Callable[[list[str], list[str]], None] | None = None,
     ) -> tuple[list[str], list[str]]:
         """Poll the conversation document until image file ids appear or budget runs out.
 
@@ -2131,6 +2162,7 @@ class OpenAIBackendAPI:
         last_hit_key: tuple[tuple[str, ...], tuple[str, ...]] | None = (
             (tuple(file_ids), tuple(sediment_ids)) if has_initial_ids else None
         )
+        last_callback_key: tuple[tuple[str, ...], tuple[str, ...]] | None = None
         logger.info({
             "event": "image_poll_start",
             "conversation_id": conversation_id,
@@ -2226,6 +2258,28 @@ class OpenAIBackendAPI:
                     if sediment_id not in sediment_ids:
                         sediment_ids.append(sediment_id)
 
+            current_key = (tuple(file_ids), tuple(sediment_ids))
+            if result_ids_callback is not None and current_key != last_callback_key and (file_ids or sediment_ids):
+                try:
+                    result_ids_callback(list(file_ids), list(sediment_ids))
+                except Exception as exc:
+                    logger.warning({
+                        "event": "image_poll_result_callback_failed",
+                        "conversation_id": conversation_id,
+                        "error": repr(exc)[:300],
+                    })
+                else:
+                    last_callback_key = current_key
+
+            terminal_state = self._image_generation_terminal_state(conversation) if wait_for_terminal else ""
+            if wait_for_terminal and terminal_state:
+                if terminal_state == "failed" and not file_ids and not sediment_ids:
+                    raise RuntimeError(last_task_error or "upstream image generation failed")
+                self.last_image_completion_reason = (
+                    "upstream_partial" if terminal_state == "failed" else "upstream_completed"
+                )
+                return file_ids, sediment_ids
+
             # 检查对话文本中是否包含内容政策违规错误
             # 当上游拒绝生成图片时，错误消息会出现在对话文档的 assistant 消息中，
             # 而非 /backend-api/tasks/ 的 task error 结构中。
@@ -2244,6 +2298,17 @@ class OpenAIBackendAPI:
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
             if file_ids or sediment_ids:
+                if wait_for_terminal:
+                    logger.debug({
+                        "event": "image_poll_wait_terminal",
+                        "conversation_id": conversation_id,
+                        "file_ids": file_ids,
+                        "sediment_ids": sediment_ids,
+                    })
+                    wait = min(interval, max(0.0, _remaining()))
+                    if wait > 0:
+                        time.sleep(wait)
+                    continue
                 if not config.image_check_before_hit_enabled:
                     # 先check再hit 机制关闭：直接返回首次发现的 file_ids
                     logger.info({"event": "image_poll_hit_no_settle", "conversation_id": conversation_id,
@@ -2282,6 +2347,9 @@ class OpenAIBackendAPI:
             "initial_wait_exhausted_budget": attempt == 0,
             "last_task_error": last_task_error if last_task_error else None,
         })
+        if wait_for_terminal and (file_ids or sediment_ids):
+            self.last_image_completion_reason = "timeout_with_results"
+            return file_ids, sediment_ids
         exc = ImagePollTimeoutError(
             f"ChatGPT 生图超时（已等待 {timeout_secs} 秒）。"
             f"当前超时阈值可在 config.json 中调大 image_poll_timeout_secs，"
@@ -2463,13 +2531,16 @@ class OpenAIBackendAPI:
             sediment_ids: list[str],
             poll: bool = True,
             poll_timeout_secs: float | None = None,
+            wait_for_terminal: bool = False,
+            result_urls_callback: Callable[[list[str]], None] | None = None,
     ) -> list[str]:
         file_ids = [item for item in file_ids if item != "file_upload"]
         sediment_ids = list(sediment_ids)
+        last_reported_urls: list[str] = []
         timeout = poll_timeout_secs if poll_timeout_secs is not None else config.image_poll_timeout_secs
         # 当 check-before-hit 和 settle 均已关闭，且 SSE 已给出 file_ids 时，
         # 跳过轮询直接解析 URL，省去 initial_wait + 轮询耗时。
-        if poll and conversation_id and (file_ids or sediment_ids):
+        if poll and conversation_id and (file_ids or sediment_ids) and not wait_for_terminal:
             if not config.image_check_before_hit_enabled and not config.image_settle_enabled:
                 logger.info({
                     "event": "image_resolve_skip_poll_direct_resolve",
@@ -2486,12 +2557,23 @@ class OpenAIBackendAPI:
                 "initial_sediment_ids": sediment_ids,
                 "poll_timeout_secs": timeout,
             })
+            def _report_result_ids(current_file_ids: list[str], current_sediment_ids: list[str]) -> None:
+                nonlocal last_reported_urls
+                if result_urls_callback is None:
+                    return
+                urls = self._resolve_image_urls(conversation_id, current_file_ids, current_sediment_ids)
+                if urls != last_reported_urls:
+                    result_urls_callback(list(urls))
+                    last_reported_urls = list(urls)
+
             try:
                 polled_file_ids, polled_sediment_ids = self._poll_image_results(
                     conversation_id,
                     timeout,
                     file_ids,
                     sediment_ids,
+                    wait_for_terminal=wait_for_terminal,
+                    result_ids_callback=_report_result_ids if result_urls_callback is not None else None,
                 )
             except ImagePollTimeoutError as exc:
                 # 如果轮询超时且有 task error（如 moderation 拦截），抛出 ImageContentPolicyError
@@ -2520,7 +2602,10 @@ class OpenAIBackendAPI:
             else:
                 file_ids.extend(item for item in polled_file_ids if item and item not in file_ids)
                 sediment_ids.extend(item for item in polled_sediment_ids if item and item not in sediment_ids)
-        return self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        urls = self._resolve_image_urls(conversation_id, file_ids, sediment_ids)
+        if result_urls_callback is not None and urls != last_reported_urls:
+            result_urls_callback(list(urls))
+        return urls
 
     def download_image_bytes(self, urls: list[str]) -> list[bytes]:
         images = []

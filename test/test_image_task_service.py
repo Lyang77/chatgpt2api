@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services.image_task_service import ImageTaskService
+from services.openai_backend_api import ImagePollTimeoutError
 
 
 OWNER = {"id": "owner-1", "name": "Owner", "role": "admin"}
@@ -143,6 +146,128 @@ class ImageTaskServiceTests(unittest.TestCase):
 
             self.assertEqual([item["status"] for item in result["items"]], ["error", "error"])
             self.assertTrue(all("已中断" in item.get("error", "") for item in result["items"]))
+
+    def test_running_task_exposes_incremental_deduplicated_results(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            first_reported = threading.Event()
+            release_handler = threading.Event()
+            captured_payload = {}
+
+            def handler(payload):
+                captured_payload.update(payload)
+                payload["image_result_callback"]([{"url": "http://example.test/one.png"}])
+                first_reported.set()
+                release_handler.wait(1)
+                payload["image_result_callback"]([
+                    {"url": "http://example.test/one.png"},
+                    {"url": "http://example.test/two.png"},
+                ])
+                return {
+                    "data": [
+                        {"url": "http://example.test/one.png"},
+                        {"url": "http://example.test/two.png"},
+                    ],
+                    "_completion_reason": "upstream_completed",
+                }
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="multi-task",
+                prompt="variants",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+            self.assertTrue(first_reported.wait(1))
+
+            running = service.list_tasks(OWNER, ["multi-task"])["items"][0]
+            self.assertEqual(running["status"], "running")
+            self.assertEqual(running["data"], [{"url": "http://example.test/one.png"}])
+            self.assertEqual(running["actual_image_count"], 1)
+            self.assertNotIn("n", captured_payload)
+            self.assertTrue(captured_payload["wait_for_image_terminal"])
+
+            release_handler.set()
+            completed = wait_for_task(service, OWNER, "multi-task", "success")
+            self.assertEqual(len(completed["data"]), 2)
+            self.assertEqual(completed["actual_image_count"], 2)
+            self.assertEqual(completed["completion_reason"], "upstream_completed")
+
+    def test_timeout_with_incremental_result_is_success(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def handler(payload):
+                payload["image_result_callback"]([{"url": "http://example.test/partial.png"}])
+                raise ImagePollTimeoutError("timed out")
+
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", handler)
+            service.submit_generation(
+                OWNER,
+                client_task_id="partial-task",
+                prompt="variants",
+                model="gpt-image-2",
+                size=None,
+                base_url="http://local.test",
+            )
+
+            completed = wait_for_task(service, OWNER, "partial-task", "success")
+            self.assertEqual(completed["actual_image_count"], 1)
+            self.assertEqual(completed["completion_reason"], "timeout_with_results")
+
+    def test_resume_poll_waits_for_terminal_and_reports_all_results(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            key = "owner-1:resume-task"
+            with service._lock:
+                service._tasks[key] = {
+                    "id": "resume-task",
+                    "owner_id": "owner-1",
+                    "status": "running",
+                    "mode": "generate",
+                    "model": "gpt-image-2",
+                    "quality": "auto",
+                    "data": [],
+                    "created_at": "2026-07-13 00:00:00",
+                    "updated_at": "2026-07-13 00:00:00",
+                }
+
+            backend = mock.Mock()
+            backend.last_image_completion_reason = "upstream_completed"
+            backend._resolve_image_urls.side_effect = (
+                lambda _conversation_id, file_ids, _sediment_ids: [
+                    f"https://files.test/{file_id}.png" for file_id in file_ids
+                ]
+            )
+            backend.download_image_bytes.side_effect = (
+                lambda urls: [url.encode("utf-8") for url in urls]
+            )
+
+            def poll(_conversation_id, _timeout, *, wait_for_terminal, result_ids_callback):
+                self.assertTrue(wait_for_terminal)
+                result_ids_callback(["one"], [])
+                result_ids_callback(["one", "two"], [])
+                return ["one", "two"], []
+
+            backend._poll_image_results.side_effect = poll
+
+            with (
+                mock.patch("services.openai_backend_api.OpenAIBackendAPI", return_value=backend),
+                mock.patch.object(service, "_log_call") as log_call,
+            ):
+                service._run_resume_poll(
+                    key,
+                    "conv-1",
+                    30,
+                    OWNER,
+                    "generate",
+                    "gpt-image-2",
+                )
+
+            completed = service.list_tasks(OWNER, ["resume-task"])["items"][0]
+            self.assertEqual(completed["status"], "success")
+            self.assertEqual(completed["actual_image_count"], 2)
+            self.assertEqual(completed["completion_reason"], "upstream_completed")
+            self.assertEqual(log_call.call_args.kwargs["actual_image_count"], 2)
 
 
 if __name__ == "__main__":

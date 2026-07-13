@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import type { ImageStorageMode } from "@/lib/api";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { IMAGE_THINKING_EFFORT_OPTIONS } from "@/lib/image-thinking-effort";
 
 import { useSettingsStore } from "../store";
 
@@ -24,6 +25,7 @@ export function ConfigCard() {
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
+  const setImageThinkingEffort = useSettingsStore((state) => state.setImageThinkingEffort);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageSettleEnabled = useSettingsStore((state) => state.setImageSettleEnabled);
@@ -165,6 +167,27 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">Web 生图思考等级</label>
+            <Select
+              value={config?.image_thinking_effort === "" ? "off" : String(config?.image_thinking_effort || "high")}
+              onValueChange={(value) => setImageThinkingEffort(value === "off" ? "" : value)}
+            >
+              <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white shadow-none">
+                <SelectValue placeholder="高" />
+              </SelectTrigger>
+              <SelectContent>
+                {IMAGE_THINKING_EFFORT_OPTIONS.map((option) => (
+                  <SelectItem key={option.value || "off"} value={option.value || "off"}>
+                    {option.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-stone-500">
+              仅影响 gpt-image-2 的 gpt-5-3 + picture_v2 Web 链路；关闭时不发送思考参数。
+            </p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">单账号图片并发</label>
