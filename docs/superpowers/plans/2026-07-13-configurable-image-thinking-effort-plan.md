@@ -2,7 +2,7 @@
 
 > **给 agentic workers：** 按任务逐步执行本计划并使用 TDD。步骤使用 checkbox（`- [ ]`）跟踪。本次在当前会话内执行，不派生子代理。
 
-**目标：** 在系统配置页维护 `image_thinking_effort`，并将其应用到普通 `gpt-image-2` 的 Web prepare 和正式生图请求。
+**目标：** 在系统配置页维护 `image_thinking_effort`，并将其应用到普通 `gpt-image-2` 的 Web 正式生图请求。
 
 **架构：** 后端 `ConfigStore` 负责唯一的值归一化，图片 Web 请求构造器只消费归一化结果。前端用一个可独立测试的枚举/归一化模块共享下拉选项和保存值，现有 settings store 与配置卡片负责读写和展示。
 
@@ -71,11 +71,11 @@ def image_thinking_effort(self) -> str:
 
 **Interfaces:**
 - Consumes: `config.image_thinking_effort`
-- Produces: prepare 和正式 `/backend-api/f/conversation` 请求可选的顶层 `thinking_effort`
+- Produces: 正式 `/backend-api/f/conversation` 请求可选的顶层 `thinking_effort`；prepare 请求保持不变
 
 - [ ] **Step 1：先写失败测试**
 
-使用 mock session 调用 `_prepare_image_conversation()` 和 `_start_image_generation()`，断言配置为 `high` 时两次请求的 `json` 都包含：
+使用 mock session 调用 `_prepare_image_conversation()` 和 `_start_image_generation()`，断言配置为 `high` 时 prepare 请求不含该字段，正式请求的 `json` 包含：
 
 ```python
 {"thinking_effort": "high"}
@@ -95,7 +95,7 @@ python -m pytest -q test/test_image_thinking_effort.py
 
 - [ ] **Step 3：实现最小 Payload 注入**
 
-在 prepare 和正式请求字典构造完成后执行：
+仅在正式请求字典构造完成后执行：
 
 ```python
 thinking_effort = config.image_thinking_effort

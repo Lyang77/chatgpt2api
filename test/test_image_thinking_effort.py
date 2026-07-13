@@ -38,7 +38,7 @@ class ImageThinkingEffortPayloadTests(unittest.TestCase):
 
         return prepare_url, prepare_payload, conversation_url, conversation_payload
 
-    def test_configured_effort_is_sent_to_prepare_and_conversation(self) -> None:
+    def test_configured_effort_is_sent_only_to_formal_conversation(self) -> None:
         prepare_url, prepare_payload, conversation_url, conversation_payload = self.image_requests("high")
 
         self.assertEqual(prepare_url, "https://chatgpt.com/backend-api/f/conversation/prepare")
@@ -47,7 +47,7 @@ class ImageThinkingEffortPayloadTests(unittest.TestCase):
         self.assertEqual(conversation_payload["model"], "gpt-5-3")
         self.assertEqual(prepare_payload["system_hints"], ["picture_v2"])
         self.assertEqual(conversation_payload["system_hints"], ["picture_v2"])
-        self.assertEqual(prepare_payload["thinking_effort"], "high")
+        self.assertNotIn("thinking_effort", prepare_payload)
         self.assertEqual(conversation_payload["thinking_effort"], "high")
 
     def test_disabled_effort_is_omitted_from_prepare_and_conversation(self) -> None:

@@ -28,7 +28,7 @@
 
 ## 后端设计
 
-`services/config.py` 提供归一化后的 `image_thinking_effort` 属性，并在 `get()` 返回给配置 API。图片 prepare 和正式请求构造器读取该属性：值非空时加入顶层 `thinking_effort`，为空时省略字段。
+`services/config.py` 提供归一化后的 `image_thinking_effort` 属性，并在 `get()` 返回给配置 API。只有正式 `/backend-api/f/conversation` 请求读取该属性：值非空时加入顶层 `thinking_effort`，为空时省略字段。prepare 接口不接受该字段，必须保持原载荷。
 
 配置保存后，后续新建的图片请求直接读取当前配置，无需为调用方增加请求参数。
 
@@ -60,8 +60,8 @@
 1. 缺少配置时默认为 `high`。
 2. 四个有效等级可正确读取。
 3. 非法值回退为 `high`。
-4. 关闭时 prepare 和正式请求均不含 `thinking_effort`。
-5. 启用时 prepare 和正式请求均携带相同等级。
+4. prepare 请求始终不含 `thinking_effort`。
+5. 启用时正式请求携带配置等级，关闭时正式请求省略该字段。
 6. Codex 图片链路不读取该配置。
 
 前端测试覆盖配置归一化、下拉选项和保存载荷。完成静态测试后，使用真实 `gpt-image-2` 请求验证上游接受 `high` 且仍能返回图片；再切换为关闭验证回退路径。
