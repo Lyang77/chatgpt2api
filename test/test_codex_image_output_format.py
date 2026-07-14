@@ -141,6 +141,47 @@ class CodexImageOutputFormatTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["tools"][0]["output_format"], "jpeg")
 
+    def test_codex_backend_adds_outer_image_options_and_high_reasoning(self):
+        backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        backend.access_token = "token"
+        backend.base_url = "https://chatgpt.com"
+        backend._ensure_codex_source_account = mock.Mock()
+        backend._codex_image_input = mock.Mock(return_value=[])
+        backend._codex_responses_headers = mock.Mock(return_value={})
+        backend._iter_codex_response_events = mock.Mock(return_value=iter(()))
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+
+        with (
+            mock.patch("services.openai_backend_api.urllib.request.urlopen", return_value=response) as urlopen,
+            mock.patch("services.openai_backend_api.account_service.get_account", return_value={}),
+            mock.patch("services.openai_backend_api.account_service._decode_jwt_payload", return_value={}),
+        ):
+            list(
+                backend.iter_codex_image_response_events(
+                    "generate",
+                    size="1536x1024",
+                    output_format="webp",
+                )
+            )
+
+        request = urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(
+            {
+                "reasoning": payload.get("reasoning"),
+                "size": payload.get("size"),
+                "output_format": payload.get("output_format"),
+            },
+            {
+                "reasoning": {"effort": "high"},
+                "size": "1536x1024",
+                "output_format": "webp",
+            },
+        )
+
     def test_auto_codex_image_quality_keeps_request_value(self):
         tool = self._codex_tool_payload(requested_quality="high", configured_quality="auto")
 

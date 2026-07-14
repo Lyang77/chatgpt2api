@@ -767,8 +767,13 @@ class OpenAIBackendAPI:
         path = "/backend-api/codex/responses"
         configured_quality = config.codex_image_quality
         effective_quality = str(quality or "auto") if configured_quality == "auto" else configured_quality
+        effective_size = str(size or "1024x1024")
+        effective_output_format = str(output_format or "png")
         payload = {
             "model": CODEX_RESPONSES_MODEL,
+            "reasoning": {"effort": "high"},
+            "size": effective_size,
+            "output_format": effective_output_format,
             "instructions": CODEX_RESPONSES_INSTRUCTIONS,
             "store": False,
             "input": self._codex_image_input(prompt, images or []),
@@ -776,9 +781,9 @@ class OpenAIBackendAPI:
                 "type": "image_generation",
                 "model": "gpt-image-2",
                 "action": "edit" if images else "generate",
-                "size": str(size or "1024x1024"),
+                "size": effective_size,
                 "quality": effective_quality,
-                "output_format": str(output_format or "png"),
+                "output_format": effective_output_format,
             }],
             "tool_choice": {"type": "image_generation"},
             "stream": True,
