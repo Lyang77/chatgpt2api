@@ -35,6 +35,8 @@ export type Account = {
   fail: number;
   /** 当前图片在途数(正在生成、尚未结束的图片数)。号池空闲时持续 > 0 表示并发槽位泄漏。 */
   image_inflight?: number;
+  /** 当前账号允许同时处理的最大图片任务数。 */
+  image_max_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
   allowed_models?: string[];
@@ -412,6 +414,7 @@ export async function updateAccount(
     type?: AccountType;
     status?: AccountStatus;
     quota?: number;
+    image_max_inflight?: number;
     proxy?: string;
     allowed_models?: string[];
   },

@@ -29,7 +29,6 @@ export function ConfigCard() {
   const setImageThinkingEffort = useSettingsStore((state) => state.setImageThinkingEffort);
   const setCodexImageQuality = useSettingsStore((state) => state.setCodexImageQuality);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
-  const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageSettleEnabled = useSettingsStore((state) => state.setImageSettleEnabled);
   const setImageRemoveConversationAfterResult = useSettingsStore((state) => state.setImageRemoveConversationAfterResult);
   const setImageSettleSecs = useSettingsStore((state) => state.setImageSettleSecs);
@@ -211,16 +210,6 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">
               仅影响 codex-gpt-image-2；选择低、中或高时会覆盖 API 请求中的 quality。
             </p>
-          </div>
-          <div className="space-y-2">
-            <label className="text-sm text-stone-700">单账号图片并发</label>
-            <Input
-              value={String(config?.image_account_concurrency || "")}
-              onChange={(event) => setImageAccountConcurrency(event.target.value)}
-              placeholder="1"
-              className="h-10 rounded-xl border-stone-200 bg-white"
-            />
-            <p className="text-xs text-stone-500">限制每个账号同时处理的图片请求数量，默认 3。</p>
           </div>
           <div className="space-y-2">
             <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">

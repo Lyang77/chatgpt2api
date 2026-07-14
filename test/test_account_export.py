@@ -55,6 +55,7 @@ class AccountExportTests(unittest.TestCase):
                         "access_token": access_token,
                         "id_token": id_token,
                         "refresh_token": "rt_test",
+                        "image_max_inflight": 5,
                     }
                 ]
             )
@@ -70,6 +71,7 @@ class AccountExportTests(unittest.TestCase):
         self.assertEqual(item["last_refresh"], "1970-01-01T09:00:00+08:00")
         self.assertEqual(item["id_token"], id_token)
         self.assertEqual(item["refresh_token"], "rt_test")
+        self.assertEqual(item["image_max_inflight"], 5)
 
     def test_build_export_items_skips_accounts_missing_complete_tokens(self) -> None:
         complete_access_token = make_jwt({"exp": 0})

@@ -141,6 +141,32 @@ class AccountModelAllowlistApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["item"]["allowed_models"], ["gpt-5-3", "gpt-5-5"])
 
+    def test_account_update_persists_image_max_inflight(self) -> None:
+        response = self.client.post(
+            "/api/accounts/update",
+            headers={"Authorization": "Bearer chatgpt2api"},
+            json={
+                "access_token": "token-a",
+                "image_max_inflight": 5,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["item"]["image_max_inflight"], 5)
+
+    def test_account_update_rejects_invalid_image_max_inflight(self) -> None:
+        response = self.client.post(
+            "/api/accounts/update",
+            headers={"Authorization": "Bearer chatgpt2api"},
+            json={
+                "access_token": "token-a",
+                "image_max_inflight": 0,
+            },
+        )
+
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertEqual(self.service.get_account("token-a")["image_max_inflight"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

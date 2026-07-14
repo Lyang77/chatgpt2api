@@ -62,6 +62,10 @@ import {
   type RefreshProgressResponse,
   type SystemLog,
 } from "@/lib/api";
+import {
+  formatAccountInflightLimit,
+  normalizeAccountImageMaxInflight,
+} from "@/lib/account-inflight-limit";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { cn } from "@/lib/utils";
 
@@ -183,6 +187,7 @@ function AccountsPageContent() {
   const [editStatus, setEditStatus] = useState<AccountStatus>("正常");
   const [editProxy, setEditProxy] = useState("");
   const [editAllowedModels, setEditAllowedModels] = useState<string[]>([]);
+  const [editImageMaxInflight, setEditImageMaxInflight] = useState("3");
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
@@ -698,6 +703,7 @@ function AccountsPageContent() {
     setEditStatus(account.status);
     setEditProxy(account.proxy ?? "");
     setEditAllowedModels(account.allowed_models ?? []);
+    setEditImageMaxInflight(String(normalizeAccountImageMaxInflight(account.image_max_inflight)));
   };
 
   const toggleEditAllowedModel = (model: string, checked: boolean) => {
@@ -733,10 +739,17 @@ function AccountsPageContent() {
       return;
     }
 
+    const imageMaxInflight = Number(editImageMaxInflight);
+    if (!Number.isInteger(imageMaxInflight) || imageMaxInflight < 1) {
+      toast.error("最高在途数量必须是大于等于 1 的整数");
+      return;
+    }
+
     setIsUpdating(true);
     try {
       const data = await updateAccount(editingAccount.access_token, {
         status: editStatus,
+        image_max_inflight: imageMaxInflight,
         proxy: editProxy.trim(),
         allowed_models: editAllowedModels,
       });
@@ -837,7 +850,7 @@ function AccountsPageContent() {
           <DialogHeader className="gap-2">
             <DialogTitle>编辑账户</DialogTitle>
             <DialogDescription className="text-sm leading-6">
-              手动修改账号状态、专属代理和允许模型。
+              手动修改账号状态、最高在途数量、专属代理和允许模型。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -857,6 +870,22 @@ function AccountsPageContent() {
                     ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-stone-700">最高在途数量</label>
+              <Input
+                type="number"
+                min={1}
+                step={1}
+                inputMode="numeric"
+                value={editImageMaxInflight}
+                onChange={(event) => setEditImageMaxInflight(event.target.value)}
+                placeholder="3"
+                className="h-11 rounded-xl border-stone-200 bg-white"
+              />
+              <p className="text-xs leading-5 text-stone-500">
+                该账号达到上限后将切换其他账号；所有账号满载时任务等待空闲槽位。
+              </p>
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium text-stone-700">账号代理</label>
@@ -1168,7 +1197,7 @@ function AccountsPageContent() {
                     <th className="w-32 px-4 py-3">创建时间</th>
                     <th className="w-24 px-4 py-3">额度</th>
                     <th className="w-40 px-4 py-3">恢复时间</th>
-                    <th className="w-18 px-4 py-3">在途</th>
+                    <th className="w-24 px-4 py-3">在途 / 上限</th>
                     <th className="w-18 px-4 py-3">成功</th>
                     <th className="w-18 px-4 py-3">失败</th>
                     <th className="w-24 px-4 py-3">操作</th>
@@ -1277,25 +1306,29 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3">
                           {(() => {
-                            const inflight = account.image_inflight ?? 0;
+                            const inflight = formatAccountInflightLimit(account);
                             return (
                               <button
                                 type="button"
-                                disabled={inflight <= 0}
+                                disabled={inflight.current <= 0}
                                 className={
-                                  inflight > 0
+                                  inflight.current > 0
                                     ? "font-semibold text-amber-600 hover:underline"
                                     : "text-stone-400"
                                 }
                                 title={
-                                  inflight > 0
-                                    ? "当前正在生成的图片数。号池空闲时此值持续 > 0，说明并发槽位泄漏、该账号已被静默排除出调度"
-                                    : "当前无在途生图任务"
+                                  inflight.current > 0
+                                    ? `当前 ${inflight.current} 个在途任务，账号上限 ${inflight.maximum}`
+                                    : `当前无在途生图任务，账号上限 ${inflight.maximum}`
                                 }
-                                aria-label={inflight > 0 ? `查看 ${inflight} 个在途任务` : "当前无在途任务"}
+                                aria-label={
+                                  inflight.current > 0
+                                    ? `查看 ${inflight.current} 个在途任务，账号上限 ${inflight.maximum}`
+                                    : `当前无在途任务，账号上限 ${inflight.maximum}`
+                                }
                                 onClick={() => setInflightAccount(account)}
                               >
-                                {inflight}
+                                {inflight.label}
                               </button>
                             );
                           })()}

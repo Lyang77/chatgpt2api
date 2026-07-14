@@ -175,14 +175,14 @@ class ImageEditsJsonApiTests(unittest.TestCase):
         self.assertEqual(self.calls[0]["images"], [(b"remote-png", "a.png", "image/png")])
 
     def test_image_edit_accepts_json_n_at_limit(self):
-        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 最大值", "n": 16, "image": PNG_DATA_URL})
+        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 最大值", "n": 4, "image": PNG_DATA_URL})
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(self.calls[0]["n"], 16)
+        self.assertEqual(self.calls[0]["n"], 4)
 
     def test_image_edit_rejects_json_n_out_of_range(self):
-        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 越界", "n": 17, "image": PNG_DATA_URL})
+        response = self.client.post("/v1/images/edits", headers=AUTH_HEADERS, json={"prompt": "n 越界", "n": 5, "image": PNG_DATA_URL})
         self.assertEqual(response.status_code, 400, response.text)
-        self.assertIn("n must be between 1 and 16", response.text)
+        self.assertIn("n must be between 1 and 4", response.text)
         self.assertFalse(self.calls)
 
 

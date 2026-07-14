@@ -69,6 +69,7 @@ class AccountUpdateRequest(BaseModel):
     type: str | None = None
     status: str | None = None
     quota: int | None = None
+    image_max_inflight: int | None = Field(default=None, ge=1)
     proxy: str | None = None
     allowed_models: list[str] | None = None
 
@@ -334,7 +335,7 @@ def create_router() -> APIRouter:
                 headers={"Content-Disposition": f'attachment; filename="codex-accounts-{timestamp}.zip"'},
             )
 
-        payload: dict[str, str] | list[dict[str, str]] = items[0] if len(items) == 1 else items
+        payload: dict[str, str | int] | list[dict[str, str | int]] = items[0] if len(items) == 1 else items
         return Response(
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             media_type="application/json",
@@ -353,6 +354,7 @@ def create_router() -> APIRouter:
                 "type": body.type,
                 "status": body.status,
                 "quota": body.quota,
+                "image_max_inflight": body.image_max_inflight,
                 "proxy": body.proxy,
                 "allowed_models": body.allowed_models,
             }.items()

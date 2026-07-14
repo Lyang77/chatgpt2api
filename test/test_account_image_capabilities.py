@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,76 @@ from utils.helper import anonymize_token, split_image_model
 
 
 class AccountCapabilityTests(unittest.TestCase):
+    def test_image_max_inflight_defaults_to_three(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {"access_token": "token-default"},
+                {"access_token": "token-invalid", "image_max_inflight": 0},
+            ])
+
+            self.assertEqual(service.get_account("token-default")["image_max_inflight"], 3)
+            self.assertEqual(service.get_account("token-invalid")["image_max_inflight"], 3)
+
+    def test_image_candidate_capacity_is_configured_per_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {
+                    "access_token": "token-one",
+                    "status": "正常",
+                    "quota": 5,
+                    "image_max_inflight": 1,
+                },
+                {
+                    "access_token": "token-two",
+                    "status": "正常",
+                    "quota": 5,
+                    "image_max_inflight": 2,
+                },
+            ])
+            service._image_inflight.update({"token-one": 1, "token-two": 1})
+
+            with patch.dict(config.data, {"image_account_concurrency": 99}):
+                candidates = service._list_available_candidate_tokens()
+
+            self.assertEqual(candidates, ["token-two"])
+
+    def test_image_request_waits_until_an_account_slot_is_released(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {
+                    "access_token": "token-one",
+                    "status": "正常",
+                    "quota": 5,
+                    "image_max_inflight": 1,
+                }
+            ])
+            service.fetch_remote_info = (
+                lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            )
+
+            first_token = service.get_available_access_token()
+            second_acquired = threading.Event()
+            second_tokens: list[str] = []
+
+            def acquire_second_token() -> None:
+                token = service.get_available_access_token()
+                second_tokens.append(token)
+                second_acquired.set()
+                service.release_image_slot(token)
+
+            worker = threading.Thread(target=acquire_second_token, daemon=True)
+            worker.start()
+            self.assertFalse(second_acquired.wait(0.2))
+
+            service.release_image_slot(first_token)
+
+            self.assertTrue(second_acquired.wait(2.0))
+            worker.join(timeout=2.0)
+            self.assertEqual(second_tokens, ["token-one"])
+
     def test_image_accounts_require_positive_quota(self) -> None:
         self.assertFalse(
             AccountService._is_image_account_available(

@@ -219,6 +219,14 @@ class AccountService:
             if (model := str(item or "").strip().lower())
         ))
 
+    @staticmethod
+    def _normalize_image_max_inflight(value: object) -> int:
+        try:
+            normalized = int(value)
+        except (TypeError, ValueError):
+            return 3
+        return normalized if normalized >= 1 else 3
+
     def account_allows_model(self, account: dict, model: str) -> bool:
         allowed_models = self._normalize_allowed_models(account.get("allowed_models"))
         if not allowed_models:
@@ -251,6 +259,9 @@ class AccountService:
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["allowed_models"] = self._normalize_allowed_models(normalized.get("allowed_models"))
+        normalized["image_max_inflight"] = self._normalize_image_max_inflight(
+            normalized.get("image_max_inflight")
+        )
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
         normalized["success"] = int(normalized.get("success") or 0)
@@ -939,11 +950,11 @@ class AccountService:
             plan_types: set[str] | tuple[str, ...] | None = None,
             model: str = "",
     ) -> list[str]:
-        max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
             for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, model)
-            if int(self._image_inflight.get(token, 0)) < max_concurrency
+            if int(self._image_inflight.get(token, 0))
+               < self._normalize_image_max_inflight((self._accounts.get(token) or {}).get("image_max_inflight"))
         ]
 
     def _has_configured_image_model_candidate(
@@ -1665,7 +1676,7 @@ class AccountService:
                 pass
         return result
 
-    def build_export_items(self, access_tokens: list[str] | None = None) -> list[dict[str, str]]:
+    def build_export_items(self, access_tokens: list[str] | None = None) -> list[dict[str, str | int]]:
         target_tokens = set(token for token in (access_tokens or []) if token)
         with self._lock:
             accounts = [
@@ -1674,7 +1685,7 @@ class AccountService:
                 if not target_tokens or str(item.get("access_token") or "") in target_tokens
             ]
 
-        items: list[dict[str, str]] = []
+        items: list[dict[str, str | int]] = []
         for account in accounts:
             access_token = str(account.get("access_token") or "").strip()
             refresh_token = str(account.get("refresh_token") or "").strip()
@@ -1699,7 +1710,7 @@ class AccountService:
                 or str(auth_claim.get("chatgpt_account_id") or "").strip()
                 or str(account.get("user_id") or "").strip()
             )
-            item = {
+            item: dict[str, str | int] = {
                 "type": str(account.get("export_type") or "codex"),
                 "email": email,
                 "account_id": account_id,
@@ -1708,6 +1719,9 @@ class AccountService:
                 "id_token": id_token,
                 "expired": self._timestamp_to_iso(access_payload.get("exp")),
                 "last_refresh": self._timestamp_to_iso(access_payload.get("iat")),
+                "image_max_inflight": self._normalize_image_max_inflight(
+                    account.get("image_max_inflight")
+                ),
             }
             password = str(account.get("password") or "").strip()
             if password:
