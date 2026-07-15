@@ -14,6 +14,136 @@ BASE_URL = "http://localhost:8000"
 
 
 class ModelListTests(unittest.TestCase):
+    def test_list_models_exposes_only_individually_allowed_codex_text_model(self):
+        with (
+            mock.patch.object(
+                openai_v1_models.OpenAIBackendAPI,
+                "list_models",
+                return_value={"object": "list", "data": []},
+            ),
+            mock.patch.object(
+                openai_v1_models.account_service,
+                "list_accounts",
+                return_value=[{
+                    "access_token": "token-codex",
+                    "source_type": "codex",
+                    "status": "正常",
+                    "allowed_models": ["gpt-5.6-terra"],
+                }],
+            ),
+        ):
+            result = openai_v1_models.list_models()
+
+        ids = {item["id"] for item in result["data"]}
+        codex_text_ids = {
+            model
+            for model in ids
+            if model == "gpt-5.5" or model.startswith("gpt-5.6")
+        }
+        self.assertEqual(codex_text_ids, {"gpt-5.6-terra"})
+
+    def test_list_models_exposes_all_codex_text_models_for_unrestricted_account(self):
+        with (
+            mock.patch.object(
+                openai_v1_models.OpenAIBackendAPI,
+                "list_models",
+                return_value={"object": "list", "data": []},
+            ),
+            mock.patch.object(
+                openai_v1_models.account_service,
+                "list_accounts",
+                return_value=[{
+                    "access_token": "token-codex",
+                    "source_type": "codex",
+                    "status": "正常",
+                }],
+            ),
+        ):
+            result = openai_v1_models.list_models()
+
+        ids = {item["id"] for item in result["data"]}
+        codex_text_ids = {
+            model
+            for model in ids
+            if model == "gpt-5.5" or model.startswith("gpt-5.6")
+        }
+        expected = {"gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"}
+        self.assertEqual(codex_text_ids, expected)
+
+    def test_list_models_exposes_codex_text_model_for_eligible_codex_account(self):
+        with (
+            mock.patch.object(
+                openai_v1_models.OpenAIBackendAPI,
+                "list_models",
+                return_value={
+                    "object": "list",
+                    "data": [{"id": "gpt-5-5", "object": "model"}],
+                },
+            ),
+            mock.patch.object(
+                openai_v1_models.account_service,
+                "list_accounts",
+                return_value=[{
+                    "access_token": "token-codex",
+                    "source_type": "codex",
+                    "status": "正常",
+                    "allowed_models": ["gpt-5.5"],
+                }],
+            ),
+        ):
+            result = openai_v1_models.list_models()
+
+        ids = [item["id"] for item in result["data"]]
+        self.assertIn("gpt-5.5", ids)
+        self.assertIn("gpt-5-5", ids)
+
+    def test_list_models_hides_codex_text_model_without_eligible_codex_account(self):
+        with (
+            mock.patch.object(
+                openai_v1_models.OpenAIBackendAPI,
+                "list_models",
+                return_value={
+                    "object": "list",
+                    "data": [{"id": "gpt-5-5", "object": "model"}],
+                },
+            ),
+            mock.patch.object(
+                openai_v1_models.account_service,
+                "list_accounts",
+                return_value=[
+                    {
+                        "access_token": "token-web",
+                        "source_type": "web",
+                        "status": "正常",
+                        "allowed_models": ["gpt-5.5"],
+                    },
+                    {
+                        "access_token": "token-disabled-codex",
+                        "source_type": "codex",
+                        "status": "禁用",
+                        "allowed_models": ["gpt-5.5"],
+                    },
+                    {
+                        "access_token": "token-limited-codex",
+                        "source_type": "codex",
+                        "status": "限流",
+                        "allowed_models": ["gpt-5.5"],
+                    },
+                    {
+                        "access_token": "token-other-model",
+                        "source_type": "codex",
+                        "status": "正常",
+                        "allowed_models": ["gpt-5-5"],
+                    },
+                ],
+            ),
+        ):
+            result = openai_v1_models.list_models()
+
+        ids = [item["id"] for item in result["data"]]
+        self.assertNotIn("gpt-5.5", ids)
+        self.assertIn("gpt-5-5", ids)
+
     def test_list_models_only_returns_image_models_backed_by_account_types(self):
         with (
             mock.patch.object(

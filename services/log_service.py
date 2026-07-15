@@ -709,6 +709,27 @@ def _protocol_error_response(exc: Exception, status_code: int, sse: str) -> JSON
     return openai_error_response(message, status_code)
 
 
+def _model_account_unavailable_response(exc: Exception, sse: str) -> JSONResponse:
+    if sse == "anthropic":
+        return anthropic_error_response(str(exc), 503)
+    return openai_error_response(
+        str(exc),
+        503,
+        error_type="service_unavailable",
+        code="model_account_unavailable",
+    )
+
+
+def _structured_upstream_error_response(exc: Exception) -> JSONResponse | None:
+    to_openai_error = getattr(exc, "to_openai_error", None)
+    status_code = getattr(exc, "status_code", None)
+    if not callable(to_openai_error) or not isinstance(status_code, int):
+        return None
+    retry_after = getattr(exc, "retry_after", None)
+    headers = {"Retry-After": str(retry_after)} if isinstance(retry_after, int) else None
+    return JSONResponse(status_code=status_code, content=to_openai_error(), headers=headers)
+
+
 def _next_item(items):
     try:
         return True, next(items)
@@ -744,11 +765,14 @@ class LoggedCall:
             raise
         except AccountModelUnavailableError as exc:
             self.log("调用失败", status="failed", error=str(exc))
-            return _protocol_error_response(exc, 503, sse)
+            return _model_account_unavailable_response(exc, sse)
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
+            structured_response = _structured_upstream_error_response(exc)
+            if structured_response is not None:
+                return structured_response
             return _protocol_error_response(exc, 502, sse)
 
         if isinstance(result, dict):
@@ -768,11 +792,14 @@ class LoggedCall:
             raise
         except AccountModelUnavailableError as exc:
             self.log("调用失败", status="failed", error=str(exc))
-            return _protocol_error_response(exc, 503, sse)
+            return _model_account_unavailable_response(exc, sse)
         except Exception as exc:
             self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
+            structured_response = _structured_upstream_error_response(exc)
+            if structured_response is not None:
+                return structured_response
             return _protocol_error_response(exc, 502, sse)
         if not has_first:
             self.log("流式调用结束")

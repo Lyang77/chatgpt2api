@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from unittest import mock
 
 from services.account_service import AccountModelUnavailableError
 from services.log_service import LoggedCall
+from services.openai_backend_api import _CodexTextUpstreamHTTPError
 import services.protocol.conversation as conversation_module
 import services.protocol.openai_v1_chat_complete as chat_completion_module
 from services.protocol.conversation import ConversationRequest, ImageGenerationError
@@ -112,7 +114,92 @@ class ModelAccountRoutingTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn("no available account supports model gpt-5-3", response.body.decode("utf-8"))
+        payload = json.loads(response.body)
+        self.assertEqual(payload["error"]["message"], "no available account supports model gpt-5-3")
+        self.assertEqual(payload["error"]["type"], "service_unavailable")
+        self.assertEqual(payload["error"]["code"], "model_account_unavailable")
+
+    def test_stream_model_allowlist_error_returns_service_unavailable_before_sse(self) -> None:
+        def handler():
+            def events():
+                raise AccountModelUnavailableError("gpt-5.5")
+                yield  # pragma: no cover
+
+            return events()
+
+        with mock.patch("services.log_service.log_service"):
+            response = asyncio.run(
+                LoggedCall(
+                    {"id": "admin", "name": "test", "role": "admin"},
+                    "/v1/responses",
+                    "gpt-5.5",
+                    "文本生成",
+                ).run(handler)
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = json.loads(response.body)
+        self.assertEqual(payload["error"]["type"], "service_unavailable")
+        self.assertEqual(payload["error"]["code"], "model_account_unavailable")
+
+    def test_codex_upstream_http_error_preserves_status_body_and_retry_after(self) -> None:
+        def handler():
+            raise _CodexTextUpstreamHTTPError(
+                "/backend-api/codex/responses",
+                429,
+                {
+                    "error": {
+                        "message": "rate limited",
+                        "type": "rate_limit_error",
+                        "code": "rate_limit_exceeded",
+                    }
+                },
+                retry_after=7,
+            )
+
+        with mock.patch("services.log_service.log_service"):
+            response = asyncio.run(
+                LoggedCall(
+                    {"id": "admin", "name": "test", "role": "admin"},
+                    "/v1/chat/completions",
+                    "gpt-5.5",
+                    "文本生成",
+                ).run(handler)
+            )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["retry-after"], "7")
+        payload = json.loads(response.body)
+        self.assertEqual(payload["error"]["message"], "rate limited")
+        self.assertEqual(payload["error"]["type"], "rate_limit_error")
+        self.assertEqual(payload["error"]["code"], "rate_limit_exceeded")
+
+    def test_stream_codex_upstream_http_error_is_mapped_before_sse(self) -> None:
+        def handler():
+            def events():
+                raise _CodexTextUpstreamHTTPError(
+                    "/backend-api/codex/responses",
+                    401,
+                    {"error": {"message": "expired", "type": "authentication_error", "code": "invalid_api_key"}},
+                )
+                yield  # pragma: no cover
+
+            return events()
+
+        with mock.patch("services.log_service.log_service"):
+            response = asyncio.run(
+                LoggedCall(
+                    {"id": "admin", "name": "test", "role": "admin"},
+                    "/v1/responses",
+                    "gpt-5.5",
+                    "文本生成",
+                ).run(handler)
+            )
+
+        self.assertEqual(response.status_code, 401)
+        payload = json.loads(response.body)
+        self.assertEqual(payload["error"]["type"], "authentication_error")
+        self.assertEqual(payload["error"]["code"], "invalid_api_key")
 
 
 if __name__ == "__main__":

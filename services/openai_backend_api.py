@@ -22,7 +22,8 @@ from PIL import Image
 from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
-from utils.helper import UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
+from services.protocol.error_response import openai_error_payload
+from utils.helper import CODEX_TEXT_MODEL, UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -39,6 +40,17 @@ class ImagePollTimeoutError(RuntimeError):
 class ImageContentPolicyError(RuntimeError):
     """Raised when image generation is blocked by content policy moderation."""
     pass
+
+
+class _CodexTextUpstreamHTTPError(UpstreamHTTPError):
+    """Keep structured upstream details without exposing them via log-safe str()."""
+
+    def __init__(self, context: str, status_code: int, body: Any, retry_after: int | None = None) -> None:
+        super().__init__(context, status_code, body, retry_after=retry_after)
+        self.args = (f"{context} failed: status={status_code}",)
+
+    def to_openai_error(self) -> Dict[str, Any]:
+        return openai_error_payload(self.body, self.status_code)
 
 
 @dataclass
@@ -603,7 +615,25 @@ class OpenAIBackendAPI:
                 text = repr(body)
         else:
             text = str(body or "")
+        text = re.sub(
+            r"data:image/[^;,\s\"']+;base64,[A-Za-z0-9+/=_-]+",
+            "data:image/[redacted];base64,[redacted]",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\bBearer\s+[A-Za-z0-9._~+/=-]+",
+            "Bearer [redacted]",
+            text,
+            flags=re.IGNORECASE,
+        )
         return text if len(text) <= limit else text[:limit] + "...[truncated]"
+
+    @staticmethod
+    def _codex_log_value(value: Any, limit: int = 500) -> Any:
+        if isinstance(value, str):
+            return OpenAIBackendAPI._codex_body_preview(value, limit)
+        return value
 
     @staticmethod
     def _codex_event_image_result_lengths(value: Any) -> list[int]:
@@ -630,12 +660,12 @@ class OpenAIBackendAPI:
         for key in ("id", "status", "sequence_number", "response_id", "item_id", "output_index", "content_index"):
             value = event.get(key)
             if isinstance(value, (str, int, float, bool)) or value is None:
-                summary[key] = value
+                summary[key] = OpenAIBackendAPI._codex_log_value(value, 200)
         for key in ("response", "item", "output"):
             value = event.get(key)
             if isinstance(value, dict):
                 summary[f"{key}_type"] = value.get("type")
-                summary[f"{key}_status"] = value.get("status")
+                summary[f"{key}_status"] = OpenAIBackendAPI._codex_log_value(value.get("status"), 200)
                 summary[f"{key}_keys"] = list(value.keys())[:30]
             elif isinstance(value, list):
                 summary[f"{key}_len"] = len(value)
@@ -645,14 +675,14 @@ class OpenAIBackendAPI:
         error = event.get("error")
         if isinstance(error, dict):
             summary["error"] = {
-                key: error.get(key)
+                key: OpenAIBackendAPI._codex_log_value(error.get(key), 500)
                 for key in ("type", "code", "message")
                 if error.get(key) is not None
             }
         delta = event.get("delta")
         if isinstance(delta, str):
             summary["delta_len"] = len(delta)
-            summary["delta_preview"] = delta[:200]
+            summary["delta_preview"] = OpenAIBackendAPI._codex_body_preview(delta, 200)
         result_lengths = OpenAIBackendAPI._codex_event_image_result_lengths(event)
         if result_lengths:
             summary["image_result_lengths"] = result_lengths[:10]
@@ -668,9 +698,16 @@ class OpenAIBackendAPI:
     ) -> None:
         request_headers = self._codex_responses_headers()
         safe_request_headers = {
-            key: value for key, value in request_headers.items() if key.lower() != "authorization"
+            key: self._codex_log_value(value)
+            for key, value in request_headers.items()
+            if key.lower() != "authorization"
         }
-        response_headers = dict(headers.items()) if hasattr(headers, "items") else dict(headers or {})
+        raw_response_headers = dict(headers.items()) if hasattr(headers, "items") else dict(headers or {})
+        response_headers = {
+            key: self._codex_log_value(value)
+            for key, value in raw_response_headers.items()
+            if key.lower() != "authorization"
+        }
         tool = ((payload.get("tools") or [{}])[0]) if isinstance(payload.get("tools"), list) else {}
         logger.warning({
             "event": "codex_responses_http_error",
@@ -748,10 +785,170 @@ class OpenAIBackendAPI:
                 OpenAIBackendAPI._codex_body_preview(event, 1500)
                 for event in events[:10]
             ] if not image_result_lengths else [],
-            "body_preview": text[:1000] if not events else "",
+            "body_preview": OpenAIBackendAPI._codex_body_preview(text, 1000) if not events else "",
         })
         for event in events:
             yield event
+
+    @staticmethod
+    def _codex_text_event_text_length(event: Dict[str, Any]) -> int:
+        event_type = str(event.get("type") or "")
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict):
+                delta = delta.get("text")
+            return len(str(delta or ""))
+        if event_type == "response.output_text.done":
+            return len(str(event.get("text") or event.get("output_text") or ""))
+        if event_type == "response.completed":
+            response = event.get("response")
+            return sum(len(text) for text in OpenAIBackendAPI._codex_completed_output_texts(response))
+        return 0
+
+    @staticmethod
+    def _codex_completed_output_texts(value: Any) -> list[str]:
+        if isinstance(value, list):
+            texts: list[str] = []
+            for item in value:
+                texts.extend(OpenAIBackendAPI._codex_completed_output_texts(item))
+            return texts
+        if not isinstance(value, dict):
+            return []
+        texts = []
+        if value.get("type") == "output_text" and isinstance(value.get("text"), str):
+            texts.append(value["text"])
+        for key in ("output", "content"):
+            texts.extend(OpenAIBackendAPI._codex_completed_output_texts(value.get(key)))
+        return texts
+
+    @staticmethod
+    def _log_codex_text_event(event: Dict[str, Any], image_count: int) -> None:
+        event_type = str(event.get("type") or "<missing>")
+        response = event.get("response")
+        response_status = response.get("status") if isinstance(response, dict) else None
+        terminal_status = response_status or event.get("status")
+        if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
+            terminal_status = None
+        logger.info({
+            "event": "codex_text_response_event",
+            "event_type": event_type,
+            "terminal_status": str(terminal_status or ""),
+            "text_length": OpenAIBackendAPI._codex_text_event_text_length(event),
+            "image_input_count": image_count,
+        })
+
+    @staticmethod
+    def _iter_codex_text_response_events(raw: Any, image_count: int) -> Iterator[Dict[str, Any]]:
+        content_type = str(raw.headers.get("content-type") or "").lower()
+        if "application/json" in content_type:
+            data = json.loads(raw.read().decode("utf-8", "replace"))
+            if isinstance(data, dict):
+                OpenAIBackendAPI._log_codex_text_event(data, image_count)
+                yield data
+            return
+
+        data_lines: list[str] = []
+
+        def parsed_event() -> Dict[str, Any] | None:
+            payload_text = "\n".join(data_lines).strip()
+            if not payload_text or payload_text == "[DONE]":
+                return None
+            try:
+                data = json.loads(payload_text)
+            except Exception:
+                logger.info({
+                    "event": "codex_text_response_event",
+                    "event_type": "parse_error",
+                    "terminal_status": "parse_error",
+                    "text_length": 0,
+                    "image_input_count": image_count,
+                })
+                return None
+            return data if isinstance(data, dict) else None
+
+        for raw_line in raw:
+            line = raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else str(raw_line)
+            line = line.rstrip("\r\n")
+            if not line:
+                if data_lines:
+                    event = parsed_event()
+                    data_lines = []
+                    if event is not None:
+                        OpenAIBackendAPI._log_codex_text_event(event, image_count)
+                        yield event
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if data_lines:
+            event = parsed_event()
+            if event is not None:
+                OpenAIBackendAPI._log_codex_text_event(event, image_count)
+                yield event
+
+    def iter_codex_text_response_events(
+            self,
+            instructions: str,
+            input_items: list[dict[str, Any]],
+            model: str = CODEX_TEXT_MODEL,
+            reasoning_effort: str = "high",
+    ) -> Iterator[Dict[str, Any]]:
+        if not self.access_token:
+            raise RuntimeError("access_token is required for codex text endpoints")
+        self._ensure_codex_source_account()
+        path = "/backend-api/codex/responses"
+        payload = {
+            "model": model,
+            "reasoning": {"effort": reasoning_effort},
+            "instructions": instructions,
+            "store": False,
+            "input": input_items,
+            "stream": True,
+        }
+        request = urllib.request.Request(
+            self.base_url + path,
+            json.dumps(payload).encode(),
+            self._codex_responses_headers(),
+            method="POST",
+        )
+        text_length = 0
+        image_count = 0
+        for item in input_items:
+            if not isinstance(item, dict):
+                continue
+            for part in item.get("content") or []:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") in {"input_text", "output_text"}:
+                    text_length += len(str(part.get("text") or ""))
+                elif part.get("type") == "input_image":
+                    image_count += 1
+        logger.info({
+            "event": "codex_text_request",
+            "event_type": "request",
+            "terminal_status": "",
+            "text_length": len(instructions) + text_length,
+            "image_input_count": image_count,
+        })
+        try:
+            with urllib.request.urlopen(request, timeout=1200) as raw:
+                yield from self._iter_codex_text_response_events(raw, image_count)
+        except urllib.error.HTTPError as error:
+            body_text = error.read().decode("utf-8", "replace")
+            body: Any = body_text
+            try:
+                body = json.loads(body_text)
+            except Exception:
+                pass
+            logger.warning({
+                "event": "codex_text_response_event",
+                "event_type": "http_error",
+                "terminal_status": str(error.code),
+                "text_length": 0,
+                "image_input_count": image_count,
+            })
+            retry_after_header = error.headers.get("Retry-After") if error.headers else None
+            retry_after = int(retry_after_header) if str(retry_after_header or "").isdigit() else None
+            raise _CodexTextUpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
     def iter_codex_image_response_events(
             self,

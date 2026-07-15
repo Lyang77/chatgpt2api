@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import api.accounts as accounts_module
 from services.account_service import AccountModelUnavailableError, AccountService
 from services.storage.json_storage import JSONStorageBackend
+from utils.helper import CODEX_TEXT_MODEL, is_codex_text_model
 
 
 class AccountModelAllowlistTests(unittest.TestCase):
@@ -44,6 +45,56 @@ class AccountModelAllowlistTests(unittest.TestCase):
         self.service.refresh_access_token = lambda token, **_: token  # type: ignore[method-assign]
 
         self.assertEqual(self.service.get_text_access_token("gpt-5-5"), "token-b")
+
+    def test_codex_text_model_uses_exact_external_name(self) -> None:
+        self.assertEqual(CODEX_TEXT_MODEL, "gpt-5.5")
+        self.assertTrue(is_codex_text_model("gpt-5.5"))
+        self.assertFalse(is_codex_text_model("gpt-5-5"))
+
+    def test_codex_text_models_define_exact_supported_set(self) -> None:
+        try:
+            from utils.helper import CODEX_TEXT_MODELS
+        except ImportError:
+            self.fail("utils.helper.CODEX_TEXT_MODELS is not implemented")
+
+        self.assertEqual(
+            CODEX_TEXT_MODELS,
+            ("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"),
+        )
+        for model in CODEX_TEXT_MODELS:
+            with self.subTest(model=model):
+                self.assertTrue(is_codex_text_model(model))
+
+    def test_codex_text_model_recognition_rejects_unknown_variants(self) -> None:
+        for model in (
+            "gpt-5-5",
+            "gpt-5.6",
+            "gpt-5.6-sol-pro",
+            "GPT-5.6-SOL",
+            " gpt-5.6-sol ",
+        ):
+            with self.subTest(model=model):
+                self.assertFalse(is_codex_text_model(model))
+
+    def test_text_selection_can_require_codex_source(self) -> None:
+        self.service.add_account_items([
+            {"access_token": "token-web", "source_type": "web", "allowed_models": ["gpt-5.5"]},
+            {"access_token": "token-codex", "source_type": "codex", "allowed_models": ["gpt-5.5"]},
+        ])
+        self.service.refresh_access_token = lambda token, **_: token  # type: ignore[method-assign]
+
+        token = self.service.get_text_access_token("gpt-5.5", source_type="codex")
+
+        self.assertEqual(token, "token-codex")
+
+    def test_text_selection_rejects_web_fallback_for_codex_source(self) -> None:
+        self.service.add_account_items([
+            {"access_token": "token-web", "source_type": "web", "allowed_models": ["gpt-5.5"]},
+        ])
+        self.service.refresh_access_token = lambda token, **_: token  # type: ignore[method-assign]
+
+        with self.assertRaisesRegex(RuntimeError, "no available account supports model gpt-5.5"):
+            self.service.get_text_access_token("gpt-5.5", source_type="codex")
 
     def test_auto_uses_only_an_unrestricted_account(self) -> None:
         self.service.add_account_items([

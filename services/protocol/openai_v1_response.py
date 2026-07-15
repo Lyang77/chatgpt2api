@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import time
 import uuid
 from typing import Any, Iterable, Iterator
@@ -7,6 +8,7 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
+from services.protocol.codex_text import CodexTextRequest, codex_messages, stream_codex_text_deltas
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -28,7 +30,12 @@ from services.protocol.web_search_tool import (
     search_query_from_messages,
     text_with_url_citations,
 )
-from utils.helper import extract_image_from_message_content, extract_response_prompt, has_response_image_generation_tool
+from utils.helper import (
+    extract_image_from_message_content,
+    extract_response_prompt,
+    has_response_image_generation_tool,
+    is_codex_text_model,
+)
 from utils.image_tokens import (
     count_image_content_tokens,
     count_image_output_items_tokens,
@@ -205,6 +212,12 @@ def text_output_item(
     }
 
 
+def _with_account_email(payload: dict[str, Any], account_email: str) -> dict[str, Any]:
+    if account_email:
+        payload["_account_email"] = account_email
+    return payload
+
+
 def web_search_call_item(
     query: str,
     item_id: str | None = None,
@@ -321,6 +334,82 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
     yield response_completed(response_id, model, created, [item], usage)
 
 
+def codex_response_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], CodexTextRequest]:
+    model = str(body.get("model") or "")
+    if body.get("tools") or body.get("tool_choice"):
+        raise HTTPException(status_code=400, detail={"error": f"{model} does not support tools"})
+    messages = messages_from_input(body.get("input"), body.get("instructions"))
+    instructions, input_items = codex_messages(messages)
+    if not input_items:
+        raise HTTPException(status_code=400, detail={"error": f"input is required for {model}"})
+    return messages, CodexTextRequest(
+        model=model,
+        instructions=instructions,
+        input_items=input_items,
+    )
+
+
+def stream_codex_text_response(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    messages, request = codex_response_request(body)
+    response_id = f"resp_{uuid.uuid4().hex}"
+    item_id = f"msg_{uuid.uuid4().hex}"
+    created = int(time.time())
+    full_text = ""
+    deltas = stream_codex_text_deltas(request)
+    first_delta = next(deltas)
+    yield _with_account_email(response_created(response_id, request.model, created), request.account_email)
+    yield _with_account_email({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": text_output_item("", item_id, "in_progress"),
+    }, request.account_email)
+    yield _with_account_email({
+        "type": "response.content_part.added",
+        "item_id": item_id,
+        "output_index": 0,
+        "content_index": 0,
+        "part": {"type": "output_text", "text": "", "annotations": []},
+    }, request.account_email)
+    for delta in itertools.chain([first_delta], deltas):
+        full_text += delta
+        yield _with_account_email({
+            "type": "response.output_text.delta",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": delta,
+        }, request.account_email)
+    yield _with_account_email({
+        "type": "response.output_text.done",
+        "item_id": item_id,
+        "output_index": 0,
+        "content_index": 0,
+        "text": full_text,
+    }, request.account_email)
+    yield _with_account_email({
+        "type": "response.content_part.done",
+        "item_id": item_id,
+        "output_index": 0,
+        "content_index": 0,
+        "part": {"type": "output_text", "text": full_text, "annotations": []},
+    }, request.account_email)
+    item = text_output_item(full_text, item_id, "completed")
+    yield _with_account_email({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": item,
+    }, request.account_email)
+    usage = token_usage(
+        input_text_tokens=count_message_text_tokens(messages, request.model),
+        input_image_tokens=count_message_image_tokens(messages, request.model),
+        output_text_tokens=count_text_tokens(full_text, request.model),
+    )
+    yield _with_account_email(
+        response_completed(response_id, request.model, created, [item], usage),
+        request.account_email,
+    )
+
+
 def stream_web_search_response(body: dict[str, Any], messages: list[dict[str, Any]] | None = None) -> Iterator[dict[str, Any]]:
     model = str(body.get("model") or "auto").strip() or "auto"
     messages = messages if messages is not None else messages_from_input(body.get("input"), body.get("instructions"))
@@ -405,12 +494,18 @@ def collect_response(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     for event in events:
         if event.get("type") == "response.completed":
             completed = event.get("response") if isinstance(event.get("response"), dict) else {}
+            account_email = str(event.get("_account_email") or "").strip()
+            if account_email:
+                completed["_account_email"] = account_email
     if not completed:
         raise RuntimeError("response generation failed")
     return completed
 
 
 def response_events(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    if is_codex_text_model(body.get("model")):
+        yield from stream_codex_text_response(body)
+        return
     if is_text_response_request(body):
         model, messages = text_response_parts(body)
         if has_web_search_tool(body) and not has_unsupported_response_tools(body):

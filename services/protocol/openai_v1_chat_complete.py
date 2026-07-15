@@ -7,6 +7,7 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
+from services.protocol.codex_text import CodexTextRequest, codex_messages, stream_codex_text_deltas
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -29,7 +30,14 @@ from services.protocol.web_search_tool import (
     search_query_from_messages,
     text_with_url_citations,
 )
-from utils.helper import build_chat_image_markdown_content, extract_chat_image, extract_chat_prompt, is_image_chat_request, parse_image_count
+from utils.helper import (
+    build_chat_image_markdown_content,
+    extract_chat_image,
+    extract_chat_prompt,
+    is_codex_text_model,
+    is_image_chat_request,
+    parse_image_count,
+)
 from utils.image_tokens import (
     chat_usage_from_image_usage,
     count_image_inputs_tokens,
@@ -163,6 +171,57 @@ def text_chat_response(
     request = ConversationRequest(model=model, messages=messages, thinking_effort=thinking_effort)
     return _with_account_email(
         completion_response(model, collect_text(backend, request), messages=messages),
+        request.account_email,
+    )
+
+
+def codex_chat_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], CodexTextRequest]:
+    model = str(body.get("model") or "")
+    if body.get("tools") or body.get("tool_choice"):
+        raise HTTPException(status_code=400, detail={"error": f"{model} does not support tools"})
+    messages = chat_messages_from_body(body)
+    instructions, input_items = codex_messages(messages)
+    if not input_items:
+        raise HTTPException(status_code=400, detail={"error": f"messages are required for {model}"})
+    return messages, CodexTextRequest(
+        model=model,
+        instructions=instructions,
+        input_items=input_items,
+    )
+
+
+def codex_chat_completion_response(body: dict[str, Any]) -> dict[str, Any]:
+    messages, request = codex_chat_request(body)
+    content = "".join(stream_codex_text_deltas(request))
+    return _with_account_email(
+        completion_response(request.model, content, messages=messages),
+        request.account_email,
+    )
+
+
+def stream_codex_chat_completion(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
+    _messages, request = codex_chat_request(body)
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    for delta_text in stream_codex_text_deltas(request):
+        if not sent_role:
+            sent_role = True
+            yield _with_account_email(
+                completion_chunk(request.model, {"role": "assistant"}, None, completion_id, created),
+                request.account_email,
+            )
+        yield _with_account_email(
+            completion_chunk(request.model, {"content": delta_text}, None, completion_id, created),
+            request.account_email,
+        )
+    if not sent_role:
+        yield _with_account_email(
+            completion_chunk(request.model, {"role": "assistant"}, None, completion_id, created),
+            request.account_email,
+        )
+    yield _with_account_email(
+        completion_chunk(request.model, {}, "stop", completion_id, created),
         request.account_email,
     )
 
@@ -315,6 +374,8 @@ def stream_image_chat_completion(image_outputs: Iterable[ImageOutput], model: st
 
 
 def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
+    if is_codex_text_model(body.get("model")):
+        return stream_codex_chat_completion(body) if body.get("stream") else codex_chat_completion_response(body)
     if body.get("stream"):
         if is_image_chat_request(body):
             return image_chat_events(body)

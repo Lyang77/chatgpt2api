@@ -17,6 +17,14 @@ from utils.log import logger
 BASE_IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 IMAGE_MODEL_PLAN_TYPES = ("plus", "team", "pro")
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
+CODEX_TEXT_MODEL = "gpt-5.5"
+CODEX_TEXT_MODELS = (
+    CODEX_TEXT_MODEL,
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+)
+CODEX_TEXT_MODEL_SET = frozenset(CODEX_TEXT_MODELS)
 PREFIXED_CODEX_IMAGE_MODELS = {
     f"{plan_type}-{CODEX_IMAGE_MODEL}"
     for plan_type in IMAGE_MODEL_PLAN_TYPES
@@ -129,6 +137,10 @@ def is_supported_image_model(model: object) -> bool:
 def is_codex_image_model(model: object) -> bool:
     _, base_model = split_image_model(model)
     return base_model == CODEX_IMAGE_MODEL
+
+
+def is_codex_text_model(model: object) -> bool:
+    return str(model or "") in CODEX_TEXT_MODEL_SET
 
 
 def is_image_chat_request(body: dict[str, object]) -> bool:

@@ -4,7 +4,7 @@ from typing import Any
 
 from services.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
-from utils.helper import CODEX_IMAGE_MODEL
+from utils.helper import CODEX_IMAGE_MODEL, CODEX_TEXT_MODELS
 
 
 def list_models() -> dict[str, Any]:
@@ -31,11 +31,19 @@ def list_models() -> dict[str, Any]:
            and account_service._normalize_source_type(account.get("source_type")) == "codex"
            and (normalized := account_service._normalize_account_type(account.get("type")))
     }
-
     if web_image_accounts:
         dynamic_models.add("gpt-image-2")
     if codex_types & {"Plus", "Team", "Pro"}:
         dynamic_models.add(CODEX_IMAGE_MODEL)
+    for model in CODEX_TEXT_MODELS:
+        if any(
+            isinstance(account, dict)
+            and account.get("status") == "正常"
+            and account_service._account_matches_source_type(account, "codex")
+            and account_service.account_allows_model(account, model)
+            for account in accounts
+        ):
+            dynamic_models.add(model)
     if "Plus" in codex_types:
         dynamic_models.add(f"plus-{CODEX_IMAGE_MODEL}")
     if "Team" in codex_types:
