@@ -7,7 +7,7 @@ from fastapi import HTTPException
 
 from services.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
-from utils.helper import CODEX_TEXT_MODEL
+from utils.helper import CODEX_TEXT_DEFAULT_REASONING_EFFORT, CODEX_TEXT_MODEL
 
 
 @dataclass
@@ -15,7 +15,7 @@ class CodexTextRequest:
     model: str
     instructions: str
     input_items: list[dict[str, Any]]
-    reasoning_effort: str = "high"
+    reasoning_effort: str = CODEX_TEXT_DEFAULT_REASONING_EFFORT
     account_email: str = ""
 
 

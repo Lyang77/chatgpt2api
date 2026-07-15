@@ -47,6 +47,7 @@ class CodexChatCompletionTests(unittest.TestCase):
 
     def _fake_codex_deltas(self, request):
         self.assertEqual(request.model, "gpt-5.5")
+        self.assertEqual(request.reasoning_effort, "low")
         self.assertEqual(request.instructions, "")
         self.assertEqual(request.input_items, [{
             "role": "user",
@@ -84,6 +85,7 @@ class CodexChatCompletionTests(unittest.TestCase):
             with self.subTest(model=model):
                 def fake_codex_deltas(request):
                     self.assertEqual(request.model, model)
+                    self.assertEqual(request.reasoning_effort, "low")
                     yield "codex answer"
 
                 with (
@@ -107,6 +109,18 @@ class CodexChatCompletionTests(unittest.TestCase):
                 web_backend.assert_not_called()
                 self.assertEqual(response["model"], model)
                 self.assertEqual(response["choices"][0]["message"]["content"], "codex answer")
+
+    def test_codex_chat_reasoning_effort_uses_valid_request_override(self) -> None:
+        cases = (
+            ({"reasoning_effort": "high"}, "high"),
+            ({"thinking_effort": "medium"}, "medium"),
+            ({"reasoning": {"effort": "extended"}}, "extended"),
+            ({"reasoning_effort": "invalid"}, "low"),
+        )
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                _messages, request = openai_v1_chat_complete.codex_chat_request({**self._body(), **extra})
+                self.assertEqual(request.reasoning_effort, expected)
 
     def test_gpt_5_6_sol_chat_tool_rejection_mentions_requested_model(self) -> None:
         model = "gpt-5.6-sol"
@@ -278,6 +292,7 @@ class CodexResponsesTests(unittest.TestCase):
     def test_non_stream_codex_response_accepts_string_input_and_preserves_account_email(self) -> None:
         def fake_codex_deltas(request):
             self.assertEqual(request.model, "gpt-5.5")
+            self.assertEqual(request.reasoning_effort, "low")
             self.assertEqual(request.instructions, "generate a new prompt")
             self.assertEqual(request.input_items, [{
                 "role": "user",
@@ -316,6 +331,7 @@ class CodexResponsesTests(unittest.TestCase):
             with self.subTest(model=model):
                 def fake_codex_deltas(request):
                     self.assertEqual(request.model, model)
+                    self.assertEqual(request.reasoning_effort, "low")
                     yield "codex answer"
 
                 with (
@@ -336,6 +352,22 @@ class CodexResponsesTests(unittest.TestCase):
                 web_backend.assert_not_called()
                 self.assertEqual(response["model"], model)
                 self.assertEqual(response["output"][0]["content"][0]["text"], "codex answer")
+
+    def test_codex_responses_reasoning_effort_uses_valid_request_override(self) -> None:
+        cases = (
+            ({"reasoning": {"effort": "high"}}, "high"),
+            ({"thinking_effort": "medium"}, "medium"),
+            ({"reasoning_effort": "extended"}, "extended"),
+            ({"reasoning": {"effort": "invalid"}}, "low"),
+        )
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                _messages, request = openai_v1_response.codex_response_request({
+                    "model": "gpt-5.5",
+                    "input": "hello",
+                    **extra,
+                })
+                self.assertEqual(request.reasoning_effort, expected)
 
     def test_gpt_5_6_sol_responses_tool_rejection_mentions_requested_model(self) -> None:
         model = "gpt-5.6-sol"

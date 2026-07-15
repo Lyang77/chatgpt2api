@@ -31,6 +31,7 @@ from services.protocol.web_search_tool import (
     text_with_url_citations,
 )
 from utils.helper import (
+    CODEX_TEXT_DEFAULT_REASONING_EFFORT,
     extract_image_from_message_content,
     extract_response_prompt,
     has_response_image_generation_tool,
@@ -346,6 +347,7 @@ def codex_response_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], 
         model=model,
         instructions=instructions,
         input_items=input_items,
+        reasoning_effort=thinking_effort_from_body(body) or CODEX_TEXT_DEFAULT_REASONING_EFFORT,
     )
 
 

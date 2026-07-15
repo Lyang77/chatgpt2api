@@ -150,7 +150,7 @@ python -m unittest test.test_account_model_allowlist test.test_v1_models test.te
 
 **接口：**
 
-- 产出：`CodexTextRequest(model, instructions, input_items, reasoning_effort="high", account_email="")`
+- 产出：`CodexTextRequest(model, instructions, input_items, reasoning_effort="low", account_email="")`
 - 产出：`codex_messages(messages, instructions="") -> tuple[str, list[dict[str, Any]]]`
 - 产出：`stream_codex_text_deltas(request: CodexTextRequest) -> Iterator[str]`
 - 产出：`collect_codex_text(request: CodexTextRequest) -> str`
@@ -197,7 +197,7 @@ class CodexTextRequest:
     model: str
     instructions: str
     input_items: list[dict[str, Any]]
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "low"
     account_email: str = ""
 
 def normalize_codex_image_url(value: object) -> str:
@@ -219,7 +219,7 @@ def normalize_codex_image_url(value: object) -> str:
 
 ```python
 self.assertEqual(payload["model"], "gpt-5.5")
-self.assertEqual(payload["reasoning"], {"effort": "high"})
+self.assertEqual(payload["reasoning"], {"effort": "low"})
 self.assertEqual(payload["instructions"], "system rule")
 self.assertEqual(payload["input"], input_items)
 self.assertFalse(payload["store"])
@@ -249,7 +249,7 @@ def iter_codex_text_response_events(
         instructions: str,
         input_items: list[dict[str, Any]],
         model: str = CODEX_TEXT_MODEL,
-        reasoning_effort: str = "high",
+        reasoning_effort: str = "low",
 ) -> Iterator[Dict[str, Any]]:
     if not self.access_token:
         raise RuntimeError("access_token is required for codex text endpoints")

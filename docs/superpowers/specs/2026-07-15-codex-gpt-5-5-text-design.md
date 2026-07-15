@@ -132,7 +132,7 @@ Codex 文本模型只允许使用满足以下条件的账户：
 ```json
 {
   "model": "gpt-5.5",
-  "reasoning": {"effort": "high"},
+  "reasoning": {"effort": "low"},
   "instructions": "根据参考图和模板生成新的电商图片 Prompt。",
   "store": false,
   "input": [
@@ -154,7 +154,7 @@ Codex 文本模型只允许使用满足以下条件的账户：
 POST https://chatgpt.com/backend-api/codex/responses
 ```
 
-所有四个模型固定使用 `reasoning.effort=high`，不新增请求级配置，也不携带 `tools`、`tool_choice`、`size`、`quality` 或图片生成参数。上游请求中的 `model` 必须保持客户端请求的精确模型 ID，不允许统一改写成 `gpt-5.5`。
+所有四个模型默认使用 `reasoning.effort=low`。Chat Completions 与 Responses 均接受 `reasoning_effort`、`thinking_effort` 或 `reasoning.effort`；合法值 `low`、`medium`、`high`、`extended`（`xhigh` 归一化为 `extended`）覆盖默认值，空值或非法值回落到 `low`。请求不携带 `tools`、`tool_choice`、`size`、`quality` 或图片生成参数。上游请求中的 `model` 必须保持客户端请求的精确模型 ID，不允许统一改写成 `gpt-5.5`。
 
 ## SSE 解析与输出
 

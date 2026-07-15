@@ -31,6 +31,7 @@ from services.protocol.web_search_tool import (
     text_with_url_citations,
 )
 from utils.helper import (
+    CODEX_TEXT_DEFAULT_REASONING_EFFORT,
     build_chat_image_markdown_content,
     extract_chat_image,
     extract_chat_prompt,
@@ -187,6 +188,7 @@ def codex_chat_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], Code
         model=model,
         instructions=instructions,
         input_items=input_items,
+        reasoning_effort=thinking_effort_from_body(body) or CODEX_TEXT_DEFAULT_REASONING_EFFORT,
     )
 
 

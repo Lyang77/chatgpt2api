@@ -140,7 +140,7 @@ class CodexTextTransportTests(unittest.TestCase):
         payload = json.loads(outgoing.data.decode("utf-8"))
         self.assertEqual(outgoing.full_url, "https://chatgpt.com/backend-api/codex/responses")
         self.assertEqual(payload["model"], "gpt-5.5")
-        self.assertEqual(payload["reasoning"], {"effort": "high"})
+        self.assertEqual(payload["reasoning"], {"effort": "low"})
         self.assertEqual(payload["instructions"], "system rule")
         self.assertEqual(payload["input"], self._request().input_items)
         self.assertFalse(payload["store"])

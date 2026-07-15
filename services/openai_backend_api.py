@@ -23,7 +23,7 @@ from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
 from services.protocol.error_response import openai_error_payload
-from utils.helper import CODEX_TEXT_MODEL, UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
+from utils.helper import CODEX_TEXT_DEFAULT_REASONING_EFFORT, CODEX_TEXT_MODEL, UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -890,7 +890,7 @@ class OpenAIBackendAPI:
             instructions: str,
             input_items: list[dict[str, Any]],
             model: str = CODEX_TEXT_MODEL,
-            reasoning_effort: str = "high",
+            reasoning_effort: str = CODEX_TEXT_DEFAULT_REASONING_EFFORT,
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex text endpoints")

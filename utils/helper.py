@@ -18,6 +18,7 @@ BASE_IMAGE_MODELS = {"gpt-image-2", "codex-gpt-image-2"}
 IMAGE_MODEL_PLAN_TYPES = ("plus", "team", "pro")
 CODEX_IMAGE_MODEL = "codex-gpt-image-2"
 CODEX_TEXT_MODEL = "gpt-5.5"
+CODEX_TEXT_DEFAULT_REASONING_EFFORT = "low"
 CODEX_TEXT_MODELS = (
     CODEX_TEXT_MODEL,
     "gpt-5.6-terra",
