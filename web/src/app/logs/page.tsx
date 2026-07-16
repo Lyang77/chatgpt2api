@@ -17,6 +17,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, stopSystemLog, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { extractLogResultContent } from "@/lib/log-detail-content";
+import { formatLogDuration } from "@/lib/log-duration";
 import { getImageLogSummary } from "@/lib/image-log-summary";
 
 const LogType = {
@@ -32,20 +33,6 @@ const typeLabels: Record<string, string> = {
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
   return typeof value === "string" || typeof value === "number" ? String(value) : "-";
-}
-
-function formatDuration(item: SystemLog, now: number) {
-  if (item.detail?.status === "running") {
-    const startedAt = item.detail?.started_at;
-    if (typeof startedAt === "string") {
-      const startedAtMs = new Date(startedAt.replace(" ", "T")).getTime();
-      if (!Number.isNaN(startedAtMs)) {
-        return `${(Math.max(0, now - startedAtMs) / 1000).toFixed(2)} s`;
-      }
-    }
-  }
-  const value = item.detail?.duration_ms;
-  return typeof value === "number" ? `${(value / 1000).toFixed(2)} s` : "-";
 }
 
 type DetailTab = "result" | "request" | "raw";
@@ -380,7 +367,7 @@ function LogsContent() {
                       <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {isCallLog ? <TableCell className="max-w-[160px] truncate">{getDetailText(item, "account_email")}</TableCell> : null}
-                      {isCallLog ? <TableCell>{formatDuration(item, now)}</TableCell> : null}
+                      {isCallLog ? <TableCell>{formatLogDuration(item, now)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
                           <Badge variant={item.detail?.status === "failed" ? "danger" : item.detail?.status === "running" ? "warning" : item.detail?.status === "stopped" ? "secondary" : "success"} className="rounded-md">
@@ -480,7 +467,7 @@ function LogsContent() {
                   ["模型", getDetailValue(detailLog, "model")],
                   ["执行账号", getDetailValue(detailLog, "account_email")],
                   ["状态", getStatus(detailLog || { id: "", time: "", type: "" })],
-                  ["调用耗时", formatDuration(detailLog || { id: "", time: "", type: "" }, now)],
+                  ["调用耗时", formatLogDuration(detailLog || { id: "", time: "", type: "" }, now)],
                   ["开始时间", getDetailValue(detailLog, "started_at")],
                   ["结束时间", getDetailValue(detailLog, "ended_at")],
                   ["Key", getDetailValue(detailLog, "key_name")],
