@@ -34,6 +34,10 @@ The existing `system_log` table remains the persistent store. Each image subtask
 | `image_total` | Total requested images in the batch |
 | `stage` | `getting_account`, `generating`, `polling`, or a terminal stage |
 | `retry_count` | Attempts made for this subtask |
+| `requested_model` | Model requested by the client |
+| `effective_model` | Model actually selected for the current attempt |
+| `fallback_reason` | `queue_wait_timeout` when delayed Codex routing is used |
+| `queue_wait_ms` | Total account-slot wait accumulated before generation |
 | `stop_requested_at` | Timestamp at which an administrator requested local cancellation |
 | `stopped_at` | Timestamp at which the service accepted the local cancellation |
 
@@ -46,10 +50,13 @@ The storage layer gains explicit create and update operations. Updating a log mu
 ```text
 incoming image request
   -> create one queued log per requested image, sharing batch_id
-  -> select account and update its log to running with account_email/stage
+  -> wait up to the configured threshold on the requested route
+  -> select one account/model and update its log to running with account_email/stage
   -> generate, poll, and update stage/retry_count
   -> update same log to success, failed, or stopped
 ```
+
+For an exact `gpt-image-2` request, the first `image_codex_fallback_wait_secs` seconds only consider non-Codex accounts (including `web` and `password` sources). After that threshold, the selector checks both routes under the same account-slot condition: an available non-Codex account remains preferred, otherwise an eligible Plus/Team/Pro `codex` account is selected with `codex-gpt-image-2`. If Codex is unavailable, the task keeps waiting for the original route. Each image subtask makes this decision independently and never mutates the shared request model used by sibling subtasks.
 
 For a retry that moves to another account, the same subtask log remains the source of truth. Its retry count increases and the account/stage fields are updated to the currently active attempt. The account pool still owns its in-memory slot counter for scheduling; logs are the durable observability source, not the scheduler's concurrency primitive.
 
@@ -77,7 +84,7 @@ All log-management and account-management detail/stop endpoints remain administr
 
 ## Error handling and consistency
 
-- Log creation happens before the image worker starts, so a task waiting for an account is visible as running.
+- Log creation happens before the image worker starts, so a task waiting for an account is visible as queued.
 - Every terminal and exception path updates the same log and releases a held account slot exactly once.
 - If a request is cancelled before an account is selected, its log still becomes `stopped`; no account email is required.
 - At service startup, persisted `running` image logs from the previous process are closed as `stopped` with `completion_reason=service_restarted` because no worker remains to complete them.
@@ -87,6 +94,8 @@ All log-management and account-management detail/stop endpoints remain administr
 
 - Unit-test log create/update, including indexed filter columns changing after an update.
 - Test one request with multiple images creates distinct logs with one shared batch ID.
+- Test the delayed dual-route selector keeps the ordinary route before the threshold and selects exactly one Codex slot after the threshold.
+- Test a Codex fallback uses a per-subtask request copy while the shared request model stays unchanged.
 - Test account assignment, retry/account change, success, failure, and polling timeout update the intended log only.
 - Test stop before account assignment, during retry wait, and while an account slot is held; assert no result is emitted and the slot is released.
 - Test duplicate stop requests are idempotent.

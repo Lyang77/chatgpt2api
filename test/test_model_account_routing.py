@@ -94,7 +94,7 @@ class ModelAccountRoutingTests(unittest.TestCase):
     def test_image_pool_selection_receives_requested_model(self) -> None:
         with mock.patch.object(
             conversation_module.account_service,
-            "get_available_access_token",
+            "get_available_access_token_with_fallback",
             side_effect=RuntimeError("no matching account"),
         ) as select:
             with self.assertRaises(ImageGenerationError):

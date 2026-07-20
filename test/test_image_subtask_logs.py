@@ -143,13 +143,16 @@ class ImageTaskRegistryTests(unittest.TestCase):
             event.set()
             return {"email": "a@example.test"}
 
-        with mock.patch.object(conversation.account_service, "get_available_access_token", return_value="token-1") as select, \
+        selection = mock.Mock(access_token="token-1", model="gpt-image-2", waited_seconds=0.01)
+        with mock.patch.object(conversation.account_service, "get_available_access_token_with_fallback", return_value=selection) as select, \
              mock.patch.object(conversation.account_service, "get_account", side_effect=get_account), \
              mock.patch.object(conversation.account_service, "mark_image_result") as mark:
             with self.assertRaises(conversation.ImageGenerationStopped):
                 conversation._generate_single_image_with_context(request, 1, 1, context)
 
         self.assertIs(select.call_args.kwargs["cancel_event"], event)
+        self.assertIsNone(select.call_args.kwargs["source_type"])
+        self.assertEqual(select.call_args.kwargs["excluded_source_types"], ("codex",))
         mark.assert_called_once_with("token-1", False)
 
     def test_account_assignment_moves_queued_log_to_running(self) -> None:
@@ -159,7 +162,11 @@ class ImageTaskRegistryTests(unittest.TestCase):
         output = conversation.ImageOutput(kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "/one.png"}])
 
         with (
-            mock.patch.object(conversation.account_service, "get_available_access_token", return_value="token-1"),
+            mock.patch.object(
+                conversation.account_service,
+                "get_available_access_token_with_fallback",
+                return_value=mock.Mock(access_token="token-1", model="gpt-image-2", waited_seconds=0.01),
+            ),
             mock.patch.object(conversation.account_service, "get_account", return_value={"email": "a@example.test"}),
             mock.patch.object(conversation.account_service, "mark_image_result"),
             mock.patch.object(conversation, "OpenAIBackendAPI"),
@@ -173,6 +180,46 @@ class ImageTaskRegistryTests(unittest.TestCase):
             call.kwargs.get("status") == "running"
             and call.kwargs.get("stage") == "generating"
             and call.kwargs.get("account_email") == "a@example.test"
+            for call in update_log.call_args_list
+        ))
+
+    def test_queue_timeout_uses_codex_model_without_mutating_shared_request(self) -> None:
+        event = self.registry.register("task-1")
+        context = ImageTaskLogContext("task-1", "batch-1", 1, 2, event)
+        request = conversation.ConversationRequest(model="gpt-image-2", prompt="draw")
+        output = conversation.ImageOutput(
+            kind="result",
+            model="codex-gpt-image-2",
+            index=1,
+            total=2,
+            data=[{"url": "/one.png"}],
+        )
+        selection = mock.Mock(
+            access_token="token-codex",
+            model="codex-gpt-image-2",
+            waited_seconds=10.25,
+        )
+
+        with (
+            mock.patch.object(conversation.account_service, "get_available_access_token_with_fallback", return_value=selection),
+            mock.patch.object(conversation.account_service, "get_account", return_value={"email": "codex@example.test"}),
+            mock.patch.object(conversation.account_service, "mark_image_result"),
+            mock.patch.object(conversation, "OpenAIBackendAPI"),
+            mock.patch.object(conversation, "stream_codex_image_outputs", return_value=iter([output])) as codex_stream,
+            mock.patch.object(conversation, "stream_image_outputs") as regular_stream,
+            mock.patch.object(conversation, "_update_image_task_log") as update_log,
+        ):
+            result = conversation._generate_single_image_with_context(request, 1, 2, context)
+
+        self.assertEqual(result, [output])
+        self.assertEqual(request.model, "gpt-image-2")
+        self.assertEqual(codex_stream.call_args.args[1].model, "codex-gpt-image-2")
+        regular_stream.assert_not_called()
+        self.assertTrue(any(
+            call.kwargs.get("requested_model") == "gpt-image-2"
+            and call.kwargs.get("effective_model") == "codex-gpt-image-2"
+            and call.kwargs.get("fallback_reason") == "queue_wait_timeout"
+            and call.kwargs.get("queue_wait_ms") == 10250
             for call in update_log.call_args_list
         ))
 

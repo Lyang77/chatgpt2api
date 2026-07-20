@@ -123,6 +123,132 @@ class AccountCapabilityTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIsInstance(errors[0], InterruptedError)
 
+    @staticmethod
+    def _add_primary_and_codex_image_accounts(service: AccountService) -> None:
+        service.add_account_items([
+            {
+                "access_token": "token-primary",
+                "source_type": "password",
+                "status": "正常",
+                "quota": 5,
+                "image_max_inflight": 1,
+                "allowed_models": ["gpt-image-2"],
+            },
+            {
+                "access_token": "token-codex",
+                "source_type": "codex",
+                "type": "Plus",
+                "status": "正常",
+                "quota": 5,
+                "image_max_inflight": 1,
+                "allowed_models": ["gpt-image-2", "codex-gpt-image-2"],
+            },
+        ])
+        service.fetch_remote_info = (
+            lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+        )
+
+    def test_image_fallback_keeps_primary_route_before_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            self._add_primary_and_codex_image_accounts(service)
+            held_token = service.get_available_access_token(
+                source_type="password",
+                model="gpt-image-2",
+            )
+            selections: list[object] = []
+
+            worker = threading.Thread(
+                target=lambda: selections.append(service.get_available_access_token_with_fallback(
+                    model="gpt-image-2",
+                    fallback_model="codex-gpt-image-2",
+                    fallback_after_seconds=1.0,
+                    excluded_source_types=("codex",),
+                    fallback_source_type="codex",
+                    fallback_plan_types=("plus", "team", "pro"),
+                )),
+                daemon=True,
+            )
+            worker.start()
+            threading.Event().wait(0.05)
+            service.release_image_slot(held_token)
+            worker.join(timeout=2.0)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(selections), 1)
+            self.assertEqual(selections[0].access_token, "token-primary")
+            self.assertEqual(selections[0].model, "gpt-image-2")
+            service.release_image_slot(selections[0].access_token)
+
+    def test_image_fallback_uses_codex_route_after_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            self._add_primary_and_codex_image_accounts(service)
+            held_token = service.get_available_access_token(
+                source_type="password",
+                model="gpt-image-2",
+            )
+
+            selection = service.get_available_access_token_with_fallback(
+                model="gpt-image-2",
+                fallback_model="codex-gpt-image-2",
+                fallback_after_seconds=0.0,
+                excluded_source_types=("codex",),
+                fallback_source_type="codex",
+                fallback_plan_types=("plus", "team", "pro"),
+            )
+
+            self.assertEqual(selection.access_token, "token-codex")
+            self.assertEqual(selection.model, "codex-gpt-image-2")
+            self.assertEqual(service._image_inflight, {"token-primary": 1, "token-codex": 1})
+            service.release_image_slot(held_token)
+            service.release_image_slot(selection.access_token)
+
+    def test_image_fallback_wait_can_be_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            self._add_primary_and_codex_image_accounts(service)
+            primary_token = service.get_available_access_token(
+                source_type="password",
+                model="gpt-image-2",
+            )
+            codex_token = service.get_available_access_token(
+                source_type="codex",
+                plan_types=("plus", "team", "pro"),
+                model="codex-gpt-image-2",
+            )
+            cancel_event = threading.Event()
+            errors: list[BaseException] = []
+
+            def acquire_cancelled_token() -> None:
+                try:
+                    service.get_available_access_token_with_fallback(
+                        model="gpt-image-2",
+                        fallback_model="codex-gpt-image-2",
+                        fallback_after_seconds=0.0,
+                        excluded_source_types=("codex",),
+                        fallback_source_type="codex",
+                        fallback_plan_types=("plus", "team", "pro"),
+                        cancel_event=cancel_event,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(
+                target=acquire_cancelled_token,
+                daemon=True,
+            )
+            worker.start()
+            self.assertFalse(cancel_event.wait(0.05))
+            cancel_event.set()
+            worker.join(timeout=2.0)
+
+            service.release_image_slot(primary_token)
+            service.release_image_slot(codex_token)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], InterruptedError)
+
     def test_image_accounts_require_positive_quota(self) -> None:
         self.assertFalse(
             AccountService._is_image_account_available(

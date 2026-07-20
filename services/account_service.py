@@ -6,6 +6,7 @@ import secrets
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Condition, Event, Lock, Thread
@@ -25,6 +26,13 @@ class AccountModelUnavailableError(RuntimeError):
     def __init__(self, model: str):
         self.model = str(model or "").strip()
         super().__init__(f"no available account supports model {self.model}")
+
+
+@dataclass(frozen=True)
+class ImageAccountSelection:
+    access_token: str
+    model: str
+    waited_seconds: float
 
 
 class AccountService:
@@ -157,6 +165,17 @@ class AccountService:
         if not source_type:
             return True
         return cls._normalize_source_type(account.get("source_type")) == cls._normalize_source_type(source_type)
+
+    @classmethod
+    def _account_avoids_source_types(
+            cls,
+            account: dict,
+            excluded_source_types: set[str] | tuple[str, ...] | None = None,
+    ) -> bool:
+        if not excluded_source_types:
+            return True
+        excluded = {cls._normalize_source_type(value) for value in excluded_source_types}
+        return cls._normalize_source_type(account.get("source_type")) not in excluded
 
     @classmethod
     def _account_matches_any_plan_type(cls, account: dict, plan_types: set[str] | tuple[str, ...] | None = None) -> bool:
@@ -928,6 +947,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
             model: str = "",
+            excluded_source_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
@@ -937,6 +957,7 @@ class AccountService:
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
+               and self._account_avoids_source_types(item, excluded_source_types)
                and self.account_allows_model(item, model)
                and (token := item.get("access_token") or "")
                and token not in excluded
@@ -949,10 +970,18 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
             model: str = "",
+            excluded_source_types: set[str] | tuple[str, ...] | None = None,
     ) -> list[str]:
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, model)
+            for token in self._list_ready_candidate_tokens(
+                excluded_tokens,
+                plan_type,
+                source_type,
+                plan_types,
+                model,
+                excluded_source_types,
+            )
             if int(self._image_inflight.get(token, 0))
                < self._normalize_image_max_inflight((self._accounts.get(token) or {}).get("image_max_inflight"))
         ]
@@ -963,11 +992,13 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
             model: str = "",
+            excluded_source_types: set[str] | tuple[str, ...] | None = None,
     ) -> bool:
         return bool(model) and any(
             self._account_matches_plan_type(item, plan_type)
             and self._account_matches_any_plan_type(item, plan_types)
             and self._account_matches_source_type(item, source_type)
+            and self._account_avoids_source_types(item, excluded_source_types)
             and self.account_allows_model(item, model)
             for item in self._accounts.values()
         )
@@ -1068,6 +1099,118 @@ class AccountService:
             f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
             if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
         )
+
+    def get_available_access_token_with_fallback(
+            self,
+            *,
+            model: str,
+            fallback_model: str,
+            fallback_after_seconds: float,
+            plan_type: str | None = None,
+            source_type: str | None = None,
+            plan_types: set[str] | tuple[str, ...] | None = None,
+            excluded_source_types: set[str] | tuple[str, ...] | None = None,
+            fallback_source_type: str | None = None,
+            fallback_plan_types: set[str] | tuple[str, ...] | None = None,
+            cancel_event: Event | None = None,
+    ) -> ImageAccountSelection:
+        started = time.monotonic()
+        fallback_after = max(0.0, float(fallback_after_seconds))
+        attempted: dict[str, set[str]] = {model: set(), fallback_model: set()}
+
+        for _attempt in range(40):
+            selected_model = model
+            selected_plan_type = plan_type
+            selected_source_type = source_type
+            selected_plan_types = plan_types
+            with self._image_slot_condition:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise InterruptedError("image task stopped while waiting for an account slot")
+
+                    elapsed = time.monotonic() - started
+                    fallback_enabled = elapsed >= fallback_after
+                    primary_ready = self._list_ready_candidate_tokens(
+                        attempted[model],
+                        plan_type,
+                        source_type,
+                        plan_types,
+                        model,
+                        excluded_source_types,
+                    )
+                    if not primary_ready and not fallback_enabled:
+                        if not self._has_configured_image_model_candidate(
+                                plan_type,
+                                source_type,
+                                plan_types,
+                                model,
+                                excluded_source_types,
+                        ):
+                            raise AccountModelUnavailableError(model)
+                        raise RuntimeError("no available image quota")
+
+                    primary_tokens = self._list_available_candidate_tokens(
+                        attempted[model],
+                        plan_type,
+                        source_type,
+                        plan_types,
+                        model,
+                        excluded_source_types,
+                    )
+                    fallback_tokens = self._list_available_candidate_tokens(
+                        attempted[fallback_model],
+                        None,
+                        fallback_source_type,
+                        fallback_plan_types,
+                        fallback_model,
+                    ) if fallback_enabled else []
+
+                    tokens = primary_tokens
+                    if not tokens and fallback_tokens:
+                        tokens = fallback_tokens
+                        selected_model = fallback_model
+                        selected_plan_type = None
+                        selected_source_type = fallback_source_type
+                        selected_plan_types = fallback_plan_types
+                    if tokens:
+                        access_token = tokens[self._index % len(tokens)]
+                        self._index += 1
+                        self._image_inflight[access_token] = int(self._image_inflight.get(access_token, 0)) + 1
+                        break
+
+                    wait_seconds = 1.0
+                    if not fallback_enabled:
+                        wait_seconds = min(wait_seconds, max(0.001, fallback_after - elapsed))
+                    self._image_slot_condition.wait(timeout=wait_seconds)
+
+            attempted[selected_model].add(access_token)
+            try:
+                account = self.fetch_remote_info(access_token, "get_available_access_token_with_fallback")
+            except Exception:
+                self.release_image_slot(access_token)
+                continue
+            resolved = str((account or {}).get("access_token") or "")
+            if resolved and resolved != access_token:
+                attempted[selected_model].add(resolved)
+            if (
+                    self._is_image_account_available(account or {})
+                    and self._account_matches_plan_type(account or {}, selected_plan_type)
+                    and self._account_matches_any_plan_type(account or {}, selected_plan_types)
+                    and self._account_matches_source_type(account or {}, selected_source_type)
+                    and (
+                        selected_model != model
+                        or self._account_avoids_source_types(account or {}, excluded_source_types)
+                    )
+                    and self.account_allows_model(account or {}, selected_model)
+            ):
+                return ImageAccountSelection(
+                    access_token=str((account or {}).get("access_token") or access_token),
+                    model=selected_model,
+                    waited_seconds=max(0.0, time.monotonic() - started),
+                )
+            self.release_image_slot(access_token)
+
+        raise RuntimeError("no available image quota after fallback routing attempts")
 
     def get_text_access_token(
         self,

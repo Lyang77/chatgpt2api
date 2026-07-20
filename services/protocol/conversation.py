@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Iterable, Iterator
 
@@ -1400,6 +1400,9 @@ def _generate_single_image_with_context(
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
     account_email = ""
+    requested_model = request.model
+    effective_model = request.model
+    queue_wait_seconds = 0.0
 
     while True:
         _raise_if_image_task_stopped(context)
@@ -1407,15 +1410,37 @@ def _generate_single_image_with_context(
             if request.progress_callback:
                 request.progress_callback("getting_account")
             _update_image_task_log(context, stage="getting_account")
-            plan_type, _ = split_image_model(request.model)
-            codex_model = is_codex_image_model(request.model)
-            token = account_service.get_available_access_token(
-                plan_type=plan_type,
-                source_type="codex" if codex_model else None,
-                plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
-                model=request.model,
-                cancel_event=context.cancel_event if context is not None else None,
-            )
+            plan_type, _ = split_image_model(effective_model)
+            codex_model = is_codex_image_model(effective_model)
+            if requested_model == "gpt-image-2" and effective_model == requested_model:
+                selection = account_service.get_available_access_token_with_fallback(
+                    model=requested_model,
+                    fallback_model="codex-gpt-image-2",
+                    fallback_after_seconds=max(
+                        0.0,
+                        config.image_codex_fallback_wait_secs - queue_wait_seconds,
+                    ),
+                    plan_type=plan_type,
+                    source_type=None,
+                    plan_types=None,
+                    excluded_source_types=("codex",),
+                    fallback_source_type="codex",
+                    fallback_plan_types=("plus", "team", "pro"),
+                    cancel_event=context.cancel_event if context is not None else None,
+                )
+                token = selection.access_token
+                effective_model = selection.model
+                queue_wait_seconds += selection.waited_seconds
+            else:
+                wait_started = time.monotonic()
+                token = account_service.get_available_access_token(
+                    plan_type=plan_type,
+                    source_type="codex" if codex_model else None,
+                    plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                    model=effective_model,
+                    cancel_event=context.cancel_event if context is not None else None,
+                )
+                queue_wait_seconds += max(0.0, time.monotonic() - wait_started)
         except InterruptedError as exc:
             raise ImageGenerationStopped(context.log_id if context is not None else "") from exc
         except RuntimeError as exc:
@@ -1439,7 +1464,18 @@ def _generate_single_image_with_context(
         except ImageGenerationStopped:
             account_service.mark_image_result(token, False)
             raise
-        _update_image_task_log(context, status="running", stage="generating", account_email=account_email)
+        fallback_used = effective_model != requested_model
+        _update_image_task_log(
+            context,
+            status="running",
+            stage="generating",
+            account_email=account_email,
+            model=effective_model,
+            requested_model=requested_model,
+            effective_model=effective_model,
+            fallback_reason="queue_wait_timeout" if fallback_used else "",
+            queue_wait_ms=max(0, int(queue_wait_seconds * 1000)),
+        )
         logger.debug({
             "event": "image_account_lookup",
             "token_prefix": token[:12] + "..." if len(token) > 12 else token,
@@ -1452,9 +1488,10 @@ def _generate_single_image_with_context(
             backend = OpenAIBackendAPI(access_token=token)
             if request.progress_callback:
                 backend.progress_callback = request.progress_callback
-            stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
+            attempt_request = request if effective_model == requested_model else replace(request, model=effective_model)
+            stream_fn = stream_codex_image_outputs if is_codex_image_model(effective_model) else stream_image_outputs
             outputs: list[ImageOutput] = []
-            for output in stream_fn(backend, request, index, total):
+            for output in stream_fn(backend, attempt_request, index, total):
                 _raise_if_image_task_stopped(context)
                 _update_image_task_log(context, stage="polling" if output.kind == "progress" else "generating")
                 if account_email and not output.account_email:

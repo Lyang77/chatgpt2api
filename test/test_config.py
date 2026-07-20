@@ -137,6 +137,24 @@ class ConfigLoadingTests(unittest.TestCase):
             self.assertEqual(updated["codex_image_quality"], "high")
             self.assertEqual(persisted["codex_image_quality"], "high")
 
+    def test_image_codex_fallback_wait_is_configurable_and_nonnegative(self) -> None:
+        module = self.config_module
+        cases = (
+            ({"auth-key": "test-auth"}, 10.0),
+            ({"auth-key": "test-auth", "image_codex_fallback_wait_secs": 2.5}, 2.5),
+            ({"auth-key": "test-auth", "image_codex_fallback_wait_secs": -1}, 0.0),
+            ({"auth-key": "test-auth", "image_codex_fallback_wait_secs": "invalid"}, 10.0),
+        )
+
+        for payload, expected in cases:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as tmp_dir:
+                config_path = Path(tmp_dir) / "config.json"
+                config_path.write_text(json.dumps(payload), encoding="utf-8")
+                store = module.ConfigStore(config_path)
+
+                self.assertEqual(store.image_codex_fallback_wait_secs, expected)
+                self.assertEqual(store.get()["image_codex_fallback_wait_secs"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

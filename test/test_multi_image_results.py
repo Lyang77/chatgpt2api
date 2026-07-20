@@ -302,8 +302,8 @@ class MultiImageResultTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "services.protocol.conversation.account_service.get_available_access_token",
-                return_value="token-1",
+                "services.protocol.conversation.account_service.get_available_access_token_with_fallback",
+                return_value=mock.Mock(access_token="token-1", model="gpt-image-2", waited_seconds=0.01),
             ) as select_account,
             mock.patch(
                 "services.protocol.conversation.account_service.get_account",
