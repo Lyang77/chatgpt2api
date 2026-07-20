@@ -9,7 +9,7 @@ function parseStartedAt(startedAt: string) {
 }
 
 export function formatLogDuration(item: LogWithDuration, now: number) {
-  if (item.detail?.status === "running") {
+  if (item.detail?.status === "queued" || item.detail?.status === "running") {
     const startedAt = item.detail?.started_at;
     if (typeof startedAt === "string") {
       const startedAtMs = parseStartedAt(startedAt);

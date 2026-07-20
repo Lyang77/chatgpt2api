@@ -88,6 +88,41 @@ class AccountCapabilityTests(unittest.TestCase):
             worker.join(timeout=2.0)
             self.assertEqual(second_tokens, ["token-one"])
 
+    def test_cancelled_image_request_stops_waiting_for_an_account_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([
+                {
+                    "access_token": "token-one",
+                    "status": "正常",
+                    "quota": 5,
+                    "image_max_inflight": 1,
+                }
+            ])
+            service.fetch_remote_info = (
+                lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            )
+            first_token = service.get_available_access_token()
+            cancel_event = threading.Event()
+            errors: list[BaseException] = []
+
+            def acquire_cancelled_token() -> None:
+                try:
+                    service.get_available_access_token(cancel_event=cancel_event)
+                except BaseException as exc:
+                    errors.append(exc)
+
+            worker = threading.Thread(target=acquire_cancelled_token, daemon=True)
+            worker.start()
+            self.assertFalse(cancel_event.wait(0.2))
+            cancel_event.set()
+
+            worker.join(timeout=2.0)
+            service.release_image_slot(first_token)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(errors), 1)
+            self.assertIsInstance(errors[0], InterruptedError)
+
     def test_image_accounts_require_positive_quota(self) -> None:
         self.assertFalse(
             AccountService._is_image_account_available(

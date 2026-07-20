@@ -12,7 +12,7 @@ This lets account management show the exact running work for an account, includi
 - One request that asks for `n` images produces `n` subtask logs.
 - Add a shared batch ID to associate sibling subtasks from the same incoming API request.
 - Persist the prompt and input-image URLs in each subtask log.
-- Add `running` and `stopped` statuses and update the same record through its lifecycle.
+- Add `queued`, `running`, and `stopped` statuses and update the same record through its lifecycle.
 - Add running-task query and a stop action in log management.
 - Add account-management in-flight detail backed by running subtask logs.
 
@@ -28,14 +28,14 @@ The existing `system_log` table remains the persistent store. Each image subtask
 
 | Field | Meaning |
 | --- | --- |
-| `status` | `running`, `success`, `failed`, or `stopped` |
+| `status` | `queued`, `running`, `success`, `failed`, or `stopped` |
 | `batch_id` | Unique ID shared by every image requested in one API call |
 | `image_index` | One-based image position in the batch |
 | `image_total` | Total requested images in the batch |
 | `stage` | `getting_account`, `generating`, `polling`, or a terminal stage |
 | `retry_count` | Attempts made for this subtask |
 | `stop_requested_at` | Timestamp at which an administrator requested local cancellation |
-| `stopped_at` | Timestamp at which the worker observed the cancellation |
+| `stopped_at` | Timestamp at which the service accepted the local cancellation |
 
 Each record also stores the full whitespace-normalized request prompt and persisted input-image URLs. The log continues to contain its associated account email, model, timing, output images, conversation ID when available, and error when relevant.
 
@@ -45,8 +45,8 @@ The storage layer gains explicit create and update operations. Updating a log mu
 
 ```text
 incoming image request
-  -> create one running log per requested image, sharing batch_id
-  -> select account and update its log with account_email/stage
+  -> create one queued log per requested image, sharing batch_id
+  -> select account and update its log to running with account_email/stage
   -> generate, poll, and update stage/retry_count
   -> update same log to success, failed, or stopped
 ```
@@ -57,21 +57,21 @@ For a retry that moves to another account, the same subtask log remains the sour
 
 Stopping a log is a local, cooperative cancellation:
 
-1. The stop endpoint only accepts a currently `running` image-subtask log.
-2. It records `stop_requested_at` and marks the task's cancellation signal.
+1. The stop endpoint accepts a currently `queued` or `running` image-subtask log.
+2. It records `stop_requested_at`, immediately persists `stopped`, and marks the task's cancellation signal.
 3. The worker checks that signal before account acquisition, between retries and retry waits, and during streaming or polling boundaries.
-4. Once observed, the worker stops local processing, releases its account slot in `finally`, and updates that same log to `stopped` with terminal timestamps.
+4. Once observed, the worker stops local processing and releases its account slot in `finally`; late progress or success updates cannot overwrite the persisted `stopped` terminal state.
 5. If upstream finishes after local cancellation, its output is discarded and is not returned to the API caller or saved as a result image.
 
 Stopping one log affects only that image subtask. Sibling images in the same batch continue normally. Repeating a stop request is idempotent: terminal logs remain unchanged and a currently stopping task does not receive duplicate cleanup.
 
 ## APIs and UI
 
-- Extend the existing log list query with `running` and `stopped` status support plus model, endpoint, batch ID, account email, key/caller, summary, and date-range filters.
+- Extend the existing log list query with `queued`, `running`, and `stopped` status support plus model, endpoint, batch ID, account email, key/caller, summary, and date-range filters.
 - Add an administrator-only stop endpoint addressed by log ID. It returns the current log state and reports whether a cancellation signal was newly set.
-- Expose an account in-flight-detail endpoint that returns only `running` image-subtask logs for the selected account. It returns the prompt and input-image URLs needed for the detail dialog.
+- Expose an account in-flight-detail endpoint that returns only account-slot-holding `running` image-subtask logs for the selected account. Queued logs stay visible in log management but do not count as account in-flight work.
 - In account management, make a positive in-flight count clickable. The dialog refreshes while open and shows model, image index/total, elapsed time, stage, retry count, prompt, and input-image previews.
-- In log management, add status labels for `running` and `stopped`, the new filters, and a stop button only for `running` image-subtask logs. The UI refreshes after a stop request.
+- In log management, show `queued` as “排队中” and `running` as “进行中”, expose both filters, and allow either unfinished state to be stopped. Confirmation, button, and success copy distinguish cancelling queued work from stopping active work.
 
 All log-management and account-management detail/stop endpoints remain administrator-only.
 
@@ -80,7 +80,7 @@ All log-management and account-management detail/stop endpoints remain administr
 - Log creation happens before the image worker starts, so a task waiting for an account is visible as running.
 - Every terminal and exception path updates the same log and releases a held account slot exactly once.
 - If a request is cancelled before an account is selected, its log still becomes `stopped`; no account email is required.
-- If a process terminates, no worker remains to complete the task. Recovery treatment of stale `running` logs is intentionally excluded from this change; operationally they represent work interrupted by the process.
+- At service startup, persisted `running` image logs from the previous process are closed as `stopped` with `completion_reason=service_restarted` because no worker remains to complete them.
 - Failure to persist a nonessential progress update must not leave a slot held. Terminal status and slot release are protected by `finally` paths.
 
 ## Verification

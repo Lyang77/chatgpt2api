@@ -8,7 +8,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Condition, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any
 from urllib.parse import urlencode
 
@@ -979,9 +979,12 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
             model: str = "",
+            cancel_event: Event | None = None,
     ) -> str:
         with self._image_slot_condition:
             while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise InterruptedError("image task stopped while waiting for an account slot")
                 if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types, model):
                     if model and not self._has_configured_image_model_candidate(
                             plan_type, source_type, plan_types, model
@@ -1017,6 +1020,7 @@ class AccountService:
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
             model: str = "",
+            cancel_event: Event | None = None,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
@@ -1032,6 +1036,7 @@ class AccountService:
                 source_type=source_type,
                 plan_types=plan_types,
                 model=model,
+                cancel_event=cancel_event,
             )
             attempted_tokens.add(access_token)
             try:

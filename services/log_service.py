@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from typing import Any
 from uuid import uuid4
 
@@ -105,6 +105,7 @@ class LogService:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.store = SQLiteLogStore(path.with_suffix(".db"), path)
+        self._update_lock = RLock()
 
     def add(self, type: str, summary: str = "", detail: dict[str, Any] | None = None, **data: Any) -> None:
         item = {
@@ -138,55 +139,83 @@ class LogService:
         summary: str | None = None,
         detail_patch: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        current = self.store.get_by_id(log_id)
-        if current is None or current.get("type") != LOG_TYPE_CALL:
-            return None
-        detail = dict(current.get("detail") or {})
-        detail.update(detail_patch or {})
-        now = datetime.now()
-        status = str(detail.get("status") or "")
-        if status in {"success", "failed", "stopped"}:
-            detail["ended_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
-        started_at = str(detail.get("started_at") or "")
-        try:
-            started = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
-            detail["duration_ms"] = max(0, int((now - started).total_seconds() * 1000))
-        except ValueError:
-            pass
-        return self.store.update(
-            log_id,
-            {
-                "id": current["id"],
-                "time": current["time"],
-                "type": current["type"],
-                "summary": summary if summary is not None else current.get("summary", ""),
-                "detail": detail,
-            },
-        )
+        with self._update_lock:
+            current = self.store.get_by_id(log_id)
+            if current is None or current.get("type") != LOG_TYPE_CALL:
+                return None
+            current_detail = dict(current.get("detail") or {})
+            if current_detail.get("status") == "stopped" and (detail_patch or {}).get("status") != "stopped":
+                return current
+            detail = dict(current_detail)
+            detail.update(detail_patch or {})
+            now = datetime.now()
+            status = str(detail.get("status") or "")
+            if status in {"success", "failed", "stopped"}:
+                detail["ended_at"] = now.strftime("%Y-%m-%d %H:%M:%S")
+            started_at = str(detail.get("started_at") or "")
+            try:
+                started = datetime.strptime(started_at, "%Y-%m-%d %H:%M:%S")
+                detail["duration_ms"] = max(0, int((now - started).total_seconds() * 1000))
+            except ValueError:
+                pass
+            return self.store.update(
+                log_id,
+                {
+                    "id": current["id"],
+                    "time": current["time"],
+                    "type": current["type"],
+                    "summary": summary if summary is not None else current.get("summary", ""),
+                    "detail": detail,
+                },
+            )
 
     def list_running_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
         return self.store.list_running_image_subtasks(account_email)
+
+    def list_unfinished_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
+        return self.store.list_unfinished_image_subtasks(account_email)
+
+    def recover_orphaned_image_tasks(self) -> int:
+        stopped_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        recovered = 0
+        for item in self.list_unfinished_image_subtasks():
+            updated = self.update_call(
+                str(item.get("id") or ""),
+                detail_patch={
+                    "status": "stopped",
+                    "stage": "stopped",
+                    "stopped_at": stopped_at,
+                    "completion_reason": "service_restarted",
+                },
+            )
+            if updated is not None and (updated.get("detail") or {}).get("status") == "stopped":
+                recovered += 1
+        return recovered
 
     def request_stop(
         self,
         log_id: str,
         registry: ImageTaskRegistry | None = None,
     ) -> tuple[bool, dict[str, Any] | None]:
-        current = self.get_by_id(log_id)
-        if current is None:
-            return False, None
-        detail = current.get("detail") or {}
-        if current.get("type") != LOG_TYPE_CALL or detail.get("status") != "running":
-            return False, current
-        stop_requested_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        updated = self.update_call(log_id, detail_patch={"stop_requested_at": stop_requested_at})
-        active_registry = registry or image_task_registry
-        if active_registry.request_stop(log_id):
-            return True, updated
-        return True, self.update_call(
-            log_id,
-            detail_patch={"status": "stopped", "stage": "stopped", "stopped_at": stop_requested_at},
-        )
+        with self._update_lock:
+            current = self.get_by_id(log_id)
+            if current is None:
+                return False, None
+            detail = current.get("detail") or {}
+            if current.get("type") != LOG_TYPE_CALL or detail.get("status") not in {"queued", "running"}:
+                return False, current
+            stopped_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            active_registry = registry or image_task_registry
+            active_registry.request_stop(log_id)
+            return True, self.update_call(
+                log_id,
+                detail_patch={
+                    "status": "stopped",
+                    "stage": "stopped",
+                    "stop_requested_at": stopped_at,
+                    "stopped_at": stopped_at,
+                },
+            )
 
     def list(
         self,
@@ -246,7 +275,7 @@ def create_image_task_log_context(
 ) -> ImageTaskLogContext:
     detail = dict(template)
     detail.update({
-        "status": "running",
+        "status": "queued",
         "batch_id": batch_id,
         "image_index": image_index,
         "image_total": image_total,

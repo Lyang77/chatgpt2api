@@ -108,10 +108,16 @@ class MutableCallLogTests(unittest.TestCase):
             {"status": "running", "endpoint": "/v1/chat/completions", "account_email": "a@example.test"},
             "文本生成 进行中",
         )
+        queued = self.service.create_call(
+            {"status": "queued", "endpoint": "/v1/images/generations"},
+            "文生图",
+        )
 
         rows = self.service.list_running_image_subtasks("a@example.test")
+        unfinished = self.service.list_unfinished_image_subtasks()
 
         self.assertEqual([item["id"] for item in rows], [running["id"]])
+        self.assertEqual({item["id"] for item in unfinished}, {running["id"], queued["id"]})
 
 
 if __name__ == "__main__":

@@ -87,6 +87,7 @@ function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
   if (status === "failed") return "失败";
+  if (status === "queued") return "排队中";
   if (status === "running") return "进行中";
   if (status === "stopped") return "已停止";
   return "-";
@@ -130,7 +131,7 @@ function LogsContent() {
   );
   const responseTextTruncated = detailLog?.detail?.response_text_truncated === true;
   const isCallLog = type === LogType.Call;
-  const hasRunningCallLogs = isCallLog && items.some((item) => item.detail?.status === "running");
+  const hasActiveCallLogs = isCallLog && items.some((item) => item.detail?.status === "queued" || item.detail?.status === "running");
   const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
@@ -176,11 +177,19 @@ function LogsContent() {
   };
 
   const handleStop = async (item: SystemLog) => {
-    if (!window.confirm("停止该图片子任务？本地将不再等待或交付后续结果。")) return;
+    const isQueued = item.detail?.status === "queued";
+    const confirmation = isQueued
+      ? "取消该排队任务？取消后不会再为它分配账号。"
+      : "停止该图片任务？本地将停止等待并忽略后续结果。";
+    if (!window.confirm(confirmation)) return;
     setStoppingId(item.id);
     try {
-      await stopSystemLog(item.id);
-      toast.success("已请求停止任务");
+      const result = await stopSystemLog(item.id);
+      if (result.stopped) {
+        toast.success(isQueued ? "已取消排队" : "任务已停止");
+      } else {
+        toast.info("任务状态已变化，无需再次停止");
+      }
       await loadLogs();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "停止任务失败");
@@ -248,10 +257,10 @@ function LogsContent() {
   }, [type, startDate, endDate]);
 
   useEffect(() => {
-    if (!hasRunningCallLogs) return;
+    if (!hasActiveCallLogs) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [hasRunningCallLogs]);
+  }, [hasActiveCallLogs]);
 
   return (
     <section className="space-y-5">
@@ -289,6 +298,7 @@ function LogsContent() {
               <SelectItem value="all">全部</SelectItem>
               <SelectItem value="success">成功</SelectItem>
               <SelectItem value="failed">失败</SelectItem>
+              <SelectItem value="queued">排队中</SelectItem>
               <SelectItem value="running">进行中</SelectItem>
               <SelectItem value="stopped">已停止</SelectItem>
             </SelectContent>
@@ -370,7 +380,7 @@ function LogsContent() {
                       {isCallLog ? <TableCell>{formatLogDuration(item, now)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
-                          <Badge variant={item.detail?.status === "failed" ? "danger" : item.detail?.status === "running" ? "warning" : item.detail?.status === "stopped" ? "secondary" : "success"} className="rounded-md">
+                          <Badge variant={item.detail?.status === "failed" ? "danger" : item.detail?.status === "running" ? "warning" : item.detail?.status === "queued" || item.detail?.status === "stopped" ? "secondary" : "success"} className="rounded-md">
                             {getStatus(item)}
                           </Badge>
                         </TableCell>
@@ -406,9 +416,14 @@ function LogsContent() {
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-600" onClick={() => openDetail(item)}>
                             查看详情
                           </Button>
-                          {item.detail?.status === "running" && String(item.detail?.endpoint || "").startsWith("/v1/images/") ? (
-                            <Button variant="ghost" className="h-8 rounded-lg px-3 text-amber-700 hover:bg-amber-50" onClick={() => void handleStop(item)} disabled={stoppingId === item.id}>
-                              停止
+                          {(item.detail?.status === "queued" || item.detail?.status === "running") && String(item.detail?.endpoint || "").startsWith("/v1/images/") ? (
+                            <Button
+                              variant="ghost"
+                              className={`h-8 rounded-lg px-3 ${item.detail?.status === "queued" ? "text-stone-600 hover:bg-stone-100" : "text-amber-700 hover:bg-amber-50"}`}
+                              onClick={() => void handleStop(item)}
+                              disabled={stoppingId === item.id}
+                            >
+                              {stoppingId === item.id ? "处理中…" : item.detail?.status === "queued" ? "取消排队" : "停止"}
                             </Button>
                           ) : null}
                           <Button variant="ghost" className="h-8 rounded-lg px-3 text-rose-600 hover:bg-rose-50 hover:text-rose-700" onClick={() => setDeletingItems([item])}>

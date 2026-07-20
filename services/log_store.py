@@ -180,9 +180,13 @@ class SQLiteLogStore:
             connection.close()
         return self.get_by_id(target_id)
 
-    def list_running_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
-        clauses = ["log_type = ?", "status = ?"]
-        params: list[object] = ["call", "running"]
+    def _list_image_subtasks_by_statuses(
+        self,
+        statuses: tuple[str, ...],
+        account_email: str = "",
+    ) -> list[dict[str, Any]]:
+        clauses = ["log_type = ?", f"status IN ({','.join('?' for _ in statuses)})"]
+        params: list[object] = ["call", *statuses]
         email = str(account_email or "").strip()
         if email:
             clauses.append("account_email = ?")
@@ -205,6 +209,12 @@ class SQLiteLogStore:
             for row in rows
             if str((item := self._from_row(row)).get("detail", {}).get("endpoint") or "").startswith("/v1/images/")
         ]
+
+    def list_running_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
+        return self._list_image_subtasks_by_statuses(("running",), account_email)
+
+    def list_unfinished_image_subtasks(self, account_email: str = "") -> list[dict[str, Any]]:
+        return self._list_image_subtasks_by_statuses(("queued", "running"), account_email)
 
     def list(
         self,

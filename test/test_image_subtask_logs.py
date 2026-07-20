@@ -18,7 +18,7 @@ class ImageTaskRegistryTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_request_stop_marks_running_log_and_signals_registered_worker(self) -> None:
+    def test_request_stop_finishes_running_log_and_signals_registered_worker(self) -> None:
         item = self.service.create_call(
             {"status": "running", "endpoint": "/v1/images/generations"},
             "文生图 进行中",
@@ -29,8 +29,27 @@ class ImageTaskRegistryTests(unittest.TestCase):
 
         self.assertTrue(stopped)
         self.assertTrue(event.is_set())
-        self.assertEqual(updated["detail"]["status"], "running")
+        self.assertEqual(updated["detail"]["status"], "stopped")
+        self.assertEqual(updated["detail"]["stage"], "stopped")
         self.assertIn("stop_requested_at", updated["detail"])
+        self.assertIn("stopped_at", updated["detail"])
+
+    def test_stopped_log_cannot_be_overwritten_by_late_worker_update(self) -> None:
+        item = self.service.create_call(
+            {"status": "running", "endpoint": "/v1/images/generations"},
+            "文生图 进行中",
+        )
+        self.registry.register(item["id"])
+        self.service.request_stop(item["id"], self.registry)
+
+        updated = self.service.update_call(
+            item["id"],
+            detail_patch={"status": "success", "stage": "success", "actual_image_count": 1},
+        )
+
+        self.assertEqual(updated["detail"]["status"], "stopped")
+        self.assertEqual(updated["detail"]["stage"], "stopped")
+        self.assertNotIn("actual_image_count", updated["detail"])
 
     def test_request_stop_finishes_orphan_running_log(self) -> None:
         item = self.service.create_call(
@@ -43,7 +62,46 @@ class ImageTaskRegistryTests(unittest.TestCase):
         self.assertTrue(stopped)
         self.assertEqual(updated["detail"]["status"], "stopped")
 
-    def test_image_task_context_creates_one_running_log_with_batch_metadata(self) -> None:
+    def test_request_stop_finishes_queued_log(self) -> None:
+        item = self.service.create_call(
+            {"status": "queued", "stage": "getting_account", "endpoint": "/v1/images/generations"},
+            "文生图",
+        )
+        event = self.registry.register(item["id"])
+
+        stopped, updated = self.service.request_stop(item["id"], self.registry)
+
+        self.assertTrue(stopped)
+        self.assertTrue(event.is_set())
+        self.assertEqual(updated["detail"]["status"], "stopped")
+
+    def test_startup_recovery_stops_orphaned_image_logs_only(self) -> None:
+        running_image = self.service.create_call(
+            {"status": "running", "endpoint": "/v1/images/generations"},
+            "文生图 进行中",
+        )
+        queued_image = self.service.create_call(
+            {"status": "queued", "stage": "getting_account", "endpoint": "/v1/images/generations"},
+            "文生图",
+        )
+        text_item = self.service.create_call(
+            {"status": "running", "endpoint": "/v1/responses"},
+            "文本生成 进行中",
+        )
+
+        recovered = self.service.recover_orphaned_image_tasks()
+
+        self.assertEqual(recovered, 2)
+        running_log = self.service.get_by_id(running_image["id"])
+        queued_log = self.service.get_by_id(queued_image["id"])
+        text_log = self.service.get_by_id(text_item["id"])
+        self.assertEqual(running_log["detail"]["status"], "stopped")
+        self.assertEqual(queued_log["detail"]["status"], "stopped")
+        self.assertEqual(queued_log["detail"]["stage"], "stopped")
+        self.assertEqual(queued_log["detail"]["completion_reason"], "service_restarted")
+        self.assertEqual(text_log["detail"]["status"], "running")
+
+    def test_image_task_context_creates_one_queued_log_with_batch_metadata(self) -> None:
         context = create_image_task_log_context(
             self.service,
             self.registry,
@@ -56,7 +114,7 @@ class ImageTaskRegistryTests(unittest.TestCase):
         item = self.service.get_by_id(context.log_id)
 
         self.assertEqual(item["summary"], "文生图")
-        self.assertEqual(item["detail"]["status"], "running")
+        self.assertEqual(item["detail"]["status"], "queued")
         self.assertEqual(item["detail"]["batch_id"], "batch-1")
         self.assertEqual(item["detail"]["image_index"], 2)
         self.assertEqual(item["detail"]["image_total"], 4)
@@ -85,13 +143,38 @@ class ImageTaskRegistryTests(unittest.TestCase):
             event.set()
             return {"email": "a@example.test"}
 
-        with mock.patch.object(conversation.account_service, "get_available_access_token", return_value="token-1"), \
+        with mock.patch.object(conversation.account_service, "get_available_access_token", return_value="token-1") as select, \
              mock.patch.object(conversation.account_service, "get_account", side_effect=get_account), \
              mock.patch.object(conversation.account_service, "mark_image_result") as mark:
             with self.assertRaises(conversation.ImageGenerationStopped):
                 conversation._generate_single_image_with_context(request, 1, 1, context)
 
+        self.assertIs(select.call_args.kwargs["cancel_event"], event)
         mark.assert_called_once_with("token-1", False)
+
+    def test_account_assignment_moves_queued_log_to_running(self) -> None:
+        event = self.registry.register("task-1")
+        context = ImageTaskLogContext("task-1", "batch-1", 1, 1, event)
+        request = conversation.ConversationRequest(model="gpt-image-2", prompt="draw")
+        output = conversation.ImageOutput(kind="result", model="gpt-image-2", index=1, total=1, data=[{"url": "/one.png"}])
+
+        with (
+            mock.patch.object(conversation.account_service, "get_available_access_token", return_value="token-1"),
+            mock.patch.object(conversation.account_service, "get_account", return_value={"email": "a@example.test"}),
+            mock.patch.object(conversation.account_service, "mark_image_result"),
+            mock.patch.object(conversation, "OpenAIBackendAPI"),
+            mock.patch.object(conversation, "stream_image_outputs", return_value=iter([output])),
+            mock.patch.object(conversation, "_update_image_task_log") as update_log,
+        ):
+            result = conversation._generate_single_image_with_context(request, 1, 1, context)
+
+        self.assertEqual(result, [output])
+        self.assertTrue(any(
+            call.kwargs.get("status") == "running"
+            and call.kwargs.get("stage") == "generating"
+            and call.kwargs.get("account_email") == "a@example.test"
+            for call in update_log.call_args_list
+        ))
 
     def test_completed_subtask_log_records_actual_image_count(self) -> None:
         request = conversation.ConversationRequest(

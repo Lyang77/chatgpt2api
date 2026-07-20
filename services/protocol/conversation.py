@@ -1414,7 +1414,10 @@ def _generate_single_image_with_context(
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
                 model=request.model,
+                cancel_event=context.cancel_event if context is not None else None,
             )
+        except InterruptedError as exc:
+            raise ImageGenerationStopped(context.log_id if context is not None else "") from exc
         except RuntimeError as exc:
             if isinstance(exc, AccountModelUnavailableError):
                 raise ImageGenerationError(
@@ -1436,7 +1439,7 @@ def _generate_single_image_with_context(
         except ImageGenerationStopped:
             account_service.mark_image_result(token, False)
             raise
-        _update_image_task_log(context, stage="generating", account_email=account_email)
+        _update_image_task_log(context, status="running", stage="generating", account_email=account_email)
         logger.debug({
             "event": "image_account_lookup",
             "token_prefix": token[:12] + "..." if len(token) > 12 else token,

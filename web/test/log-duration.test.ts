@@ -17,4 +17,16 @@ equal(
   "600.00 s",
 );
 
+equal(
+  formatLogDuration(
+    {
+      ...runningLog,
+      id: "queued-log",
+      detail: { ...runningLog.detail, status: "queued" },
+    },
+    Date.parse("2026-07-16T06:39:03Z"),
+  ),
+  "600.00 s",
+);
+
 console.log("log duration tests passed");
