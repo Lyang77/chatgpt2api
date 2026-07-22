@@ -141,7 +141,7 @@ class CodexImageOutputFormatTests(unittest.TestCase):
         payload = json.loads(request.data.decode("utf-8"))
         self.assertEqual(payload["tools"][0]["output_format"], "jpeg")
 
-    def test_codex_backend_adds_outer_image_options_and_high_reasoning(self):
+    def test_codex_backend_keeps_image_options_inside_tool(self):
         backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
         backend.access_token = "token"
         backend.base_url = "https://chatgpt.com"
@@ -169,18 +169,11 @@ class CodexImageOutputFormatTests(unittest.TestCase):
 
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(
-            {
-                "reasoning": payload.get("reasoning"),
-                "size": payload.get("size"),
-                "output_format": payload.get("output_format"),
-            },
-            {
-                "reasoning": {"effort": "high"},
-                "size": "1536x1024",
-                "output_format": "webp",
-            },
-        )
+        self.assertEqual(payload.get("reasoning"), {"effort": "high"})
+        self.assertNotIn("size", payload)
+        self.assertNotIn("output_format", payload)
+        self.assertEqual(payload["tools"][0]["size"], "1536x1024")
+        self.assertEqual(payload["tools"][0]["output_format"], "webp")
 
     def test_auto_codex_image_quality_keeps_request_value(self):
         tool = self._codex_tool_payload(requested_quality="high", configured_quality="auto")

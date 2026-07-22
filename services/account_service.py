@@ -1139,15 +1139,25 @@ class AccountService:
                         excluded_source_types,
                     )
                     if not primary_ready and not fallback_enabled:
-                        if not self._has_configured_image_model_candidate(
+                        primary_configured = self._has_configured_image_model_candidate(
                                 plan_type,
                                 source_type,
                                 plan_types,
                                 model,
                                 excluded_source_types,
-                        ):
-                            raise AccountModelUnavailableError(model)
-                        raise RuntimeError("no available image quota")
+                        )
+                        if not primary_configured:
+                            fallback_configured = self._has_configured_image_model_candidate(
+                                None,
+                                fallback_source_type,
+                                fallback_plan_types,
+                                fallback_model,
+                            )
+                            if not fallback_configured:
+                                raise AccountModelUnavailableError(model)
+                            fallback_enabled = True
+                        else:
+                            raise RuntimeError("no available image quota")
 
                     primary_tokens = self._list_available_candidate_tokens(
                         attempted[model],

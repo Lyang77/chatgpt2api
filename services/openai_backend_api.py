@@ -969,8 +969,6 @@ class OpenAIBackendAPI:
         payload = {
             "model": CODEX_RESPONSES_MODEL,
             "reasoning": {"effort": "high"},
-            "size": effective_size,
-            "output_format": effective_output_format,
             "instructions": CODEX_RESPONSES_INSTRUCTIONS,
             "store": False,
             "input": self._codex_image_input(prompt, images or []),

@@ -204,6 +204,35 @@ class AccountCapabilityTests(unittest.TestCase):
             service.release_image_slot(held_token)
             service.release_image_slot(selection.access_token)
 
+    def test_image_fallback_uses_codex_immediately_without_primary_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items([{
+                "access_token": "token-codex",
+                "source_type": "codex",
+                "type": "Pro",
+                "status": "正常",
+                "quota": 5,
+                "image_max_inflight": 1,
+                "allowed_models": ["gpt-image-2", "codex-gpt-image-2"],
+            }])
+            service.fetch_remote_info = (
+                lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            )
+
+            selection = service.get_available_access_token_with_fallback(
+                model="gpt-image-2",
+                fallback_model="codex-gpt-image-2",
+                fallback_after_seconds=60.0,
+                excluded_source_types=("codex",),
+                fallback_source_type="codex",
+                fallback_plan_types=("plus", "team", "pro"),
+            )
+
+            self.assertEqual(selection.access_token, "token-codex")
+            self.assertEqual(selection.model, "codex-gpt-image-2")
+            service.release_image_slot(selection.access_token)
+
     def test_image_fallback_wait_can_be_cancelled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
