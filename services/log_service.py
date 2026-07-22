@@ -759,6 +759,13 @@ def _structured_upstream_error_response(exc: Exception) -> JSONResponse | None:
     return JSONResponse(status_code=status_code, content=to_openai_error(), headers=headers)
 
 
+def _exception_diagnostic_detail(exc: Exception) -> dict[str, object] | None:
+    detail = getattr(exc, "diagnostic_detail", None)
+    if not isinstance(detail, dict) or not detail:
+        return None
+    return dict(detail)
+
+
 def _next_item(items):
     try:
         return True, next(items)
@@ -796,7 +803,13 @@ class LoggedCall:
             self.log("调用失败", status="failed", error=str(exc))
             return _model_account_unavailable_response(exc, sse)
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+            self.log(
+                "调用失败",
+                status="failed",
+                error=str(exc),
+                account_email=getattr(exc, "account_email", ""),
+                diagnostic_detail=_exception_diagnostic_detail(exc),
+            )
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             structured_response = _structured_upstream_error_response(exc)
@@ -823,7 +836,13 @@ class LoggedCall:
             self.log("调用失败", status="failed", error=str(exc))
             return _model_account_unavailable_response(exc, sse)
         except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+            self.log(
+                "调用失败",
+                status="failed",
+                error=str(exc),
+                account_email=getattr(exc, "account_email", ""),
+                diagnostic_detail=_exception_diagnostic_detail(exc),
+            )
             if self.endpoint.startswith("/v1/images"):
                 return _image_error_response(exc)
             structured_response = _structured_upstream_error_response(exc)
@@ -870,6 +889,7 @@ class LoggedCall:
                 response_text="".join(response_parts),
                 cache_hit=cache_hit,
                 response_image_urls=response_image_urls,
+                diagnostic_detail=_exception_diagnostic_detail(exc),
             )
             if self.endpoint.startswith("/v1/images") and not hasattr(exc, "to_openai_error"):
                 from services.protocol.conversation import ImageGenerationError, public_image_error_message
@@ -885,7 +905,8 @@ class LoggedCall:
 
     def log(self, suffix: str, result: object = None, status: str = "success", error: str = "",
             urls: list[str] | None = None, account_email: str = "", conversation_id: str = "",
-            response_text: str = "", cache_hit: bool = False, response_image_urls: list[str] | None = None) -> None:
+            response_text: str = "", cache_hit: bool = False, response_image_urls: list[str] | None = None,
+            diagnostic_detail: dict[str, object] | None = None) -> None:
         if self.skip_final_log:
             return
         detail = {
@@ -914,6 +935,8 @@ class LoggedCall:
                 detail["response_text_truncated"] = True
         if error:
             detail["error"] = error
+        if diagnostic_detail:
+            detail["upstream_error"] = dict(diagnostic_detail)
         email = str(account_email or "").strip()
         if not email:
             emails = _collect_account_emails(result)
