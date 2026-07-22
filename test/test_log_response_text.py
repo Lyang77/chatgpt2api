@@ -14,6 +14,14 @@ from services.log_service import LogService, LoggedCall, collect_request_image_u
 IDENTITY = {"id": "key-1", "name": "test-key", "role": "admin"}
 
 
+class DiagnosticError(RuntimeError):
+    diagnostic_detail = {
+        "event_type": "error",
+        "code": "rate_limit_exceeded",
+        "message": "upstream rate limited",
+    }
+
+
 class LoggedCallResponseTextTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -158,6 +166,60 @@ class LoggedCallResponseTextTests(unittest.TestCase):
         self.assertNotIn("_cache_hit", response)
         listed_detail = log_module.log_service.list(type="call")["items"][0]["detail"]
         self.assertIs(listed_detail.get("cache_hit"), True)
+
+    def test_logged_call_run_records_exception_diagnostic_detail(self) -> None:
+        call = LoggedCall(IDENTITY, "/v1/chat/completions", "gpt-5.6-terra", "文本生成")
+
+        def fail() -> None:
+            raise DiagnosticError("safe error")
+
+        response = asyncio.run(call.run(fail))
+
+        self.assertEqual(response.status_code, 502)
+        detail = self._last_detail()
+        self.assertEqual(detail.get("error"), "safe error")
+        self.assertEqual(detail.get("upstream_error"), DiagnosticError.diagnostic_detail)
+
+    def test_logged_call_run_records_first_stream_item_diagnostic_detail(self) -> None:
+        call = LoggedCall(IDENTITY, "/v1/chat/completions", "gpt-5.6-terra", "文本生成")
+
+        def broken_stream():
+            if False:
+                yield None
+            raise DiagnosticError("safe first-item error")
+
+        response = asyncio.run(call.run(broken_stream))
+
+        self.assertEqual(response.status_code, 502)
+        detail = self._last_detail()
+        self.assertEqual(detail.get("error"), "safe first-item error")
+        self.assertEqual(detail.get("upstream_error"), DiagnosticError.diagnostic_detail)
+
+    def test_stream_log_records_exception_diagnostic_detail(self) -> None:
+        call = LoggedCall(IDENTITY, "/v1/chat/completions", "gpt-5.6-terra", "文本生成")
+
+        def broken_stream():
+            yield {"choices": [{"delta": {"content": "partial"}}]}
+            raise DiagnosticError("safe stream error")
+
+        with self.assertRaisesRegex(DiagnosticError, "safe stream error"):
+            list(call.stream(broken_stream()))
+
+        detail = self._last_detail()
+        self.assertEqual(detail.get("error"), "safe stream error")
+        self.assertEqual(detail.get("response_text"), "partial")
+        self.assertEqual(detail.get("upstream_error"), DiagnosticError.diagnostic_detail)
+
+    def test_logged_call_omits_upstream_error_for_plain_exception(self) -> None:
+        call = LoggedCall(IDENTITY, "/v1/chat/completions", "auto", "文本生成")
+
+        def fail() -> None:
+            raise RuntimeError("plain error")
+
+        response = asyncio.run(call.run(fail))
+
+        self.assertEqual(response.status_code, 502)
+        self.assertNotIn("upstream_error", self._last_detail())
 
     def test_collect_request_image_urls_keeps_remote_urls(self) -> None:
         payload = {
