@@ -22,7 +22,11 @@ class ImageThinkingEffortPayloadTests(unittest.TestCase):
         requirements = ChatRequirements(token="requirements-token")
 
         with mock.patch.dict(config.data, {"image_thinking_effort": configured_effort}):
-            backend._prepare_image_conversation("draw", requirements, "gpt-image-2")
+            conduit_token, parent_message_id = backend._prepare_image_conversation(
+                "draw",
+                requirements,
+                "gpt-image-2",
+            )
             prepare_url = backend.session.post.call_args.args[0]
             prepare_payload = backend.session.post.call_args.kwargs["json"]
 
@@ -30,15 +34,16 @@ class ImageThinkingEffortPayloadTests(unittest.TestCase):
             backend._start_image_generation(
                 "draw",
                 requirements,
-                "conduit-token",
+                conduit_token,
                 "gpt-image-2",
+                parent_message_id=parent_message_id,
             )
             conversation_url = backend.session.post.call_args.args[0]
             conversation_payload = backend.session.post.call_args.kwargs["json"]
 
         return prepare_url, prepare_payload, conversation_url, conversation_payload
 
-    def test_configured_effort_is_sent_only_to_formal_conversation(self) -> None:
+    def test_configured_effort_is_omitted_from_picture_v2_requests(self) -> None:
         prepare_url, prepare_payload, conversation_url, conversation_payload = self.image_requests("high")
 
         self.assertEqual(prepare_url, "https://chatgpt.com/backend-api/f/conversation/prepare")
@@ -47,8 +52,9 @@ class ImageThinkingEffortPayloadTests(unittest.TestCase):
         self.assertEqual(conversation_payload["model"], "gpt-5-3")
         self.assertEqual(prepare_payload["system_hints"], ["picture_v2"])
         self.assertEqual(conversation_payload["system_hints"], ["picture_v2"])
+        self.assertEqual(conversation_payload["parent_message_id"], prepare_payload["parent_message_id"])
         self.assertNotIn("thinking_effort", prepare_payload)
-        self.assertEqual(conversation_payload["thinking_effort"], "high")
+        self.assertNotIn("thinking_effort", conversation_payload)
 
     def test_disabled_effort_is_omitted_from_prepare_and_conversation(self) -> None:
         _, prepare_payload, _, conversation_payload = self.image_requests("")

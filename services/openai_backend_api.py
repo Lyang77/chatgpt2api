@@ -969,8 +969,6 @@ class OpenAIBackendAPI:
         payload = {
             "model": CODEX_RESPONSES_MODEL,
             "reasoning": {"effort": "high"},
-            "size": effective_size,
-            "output_format": effective_output_format,
             "instructions": CODEX_RESPONSES_INSTRUCTIONS,
             "store": False,
             "input": self._codex_image_input(prompt, images or []),
@@ -1047,13 +1045,19 @@ class OpenAIBackendAPI:
             retry_after = int(retry_after_header) if str(retry_after_header or "").isdigit() else None
             raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
-    def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
-        """为图片生成准备 conduit token。"""
+    def _prepare_image_conversation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            model: str,
+    ) -> tuple[str, str]:
+        """为图片生成准备 conduit token 及其绑定的父消息 ID。"""
         path = "/backend-api/f/conversation/prepare"
+        parent_message_id = new_uuid()
         payload = {
             "action": "next",
             "fork_from_shared_post": False,
-            "parent_message_id": new_uuid(),
+            "parent_message_id": parent_message_id,
             "model": self._image_model_slug(model),
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
@@ -1076,7 +1080,7 @@ class OpenAIBackendAPI:
             timeout=60,
         )
         ensure_ok(response, path)
-        return response.json().get("conduit_token", "")
+        return response.json().get("conduit_token", ""), parent_message_id
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -1153,7 +1157,8 @@ class OpenAIBackendAPI:
         }
 
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
-                                references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
+                                references: Optional[list[Dict[str, Any]]] = None, *,
+                                parent_message_id: str) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
         references = references or []
         parts = [{
@@ -1191,7 +1196,7 @@ class OpenAIBackendAPI:
                 "content": content,
                 "metadata": metadata,
             }],
-            "parent_message_id": new_uuid(),
+            "parent_message_id": parent_message_id,
             "model": self._image_model_slug(model),
             "client_prepare_state": "sent",
             "timezone_offset_min": -480,
@@ -1214,9 +1219,6 @@ class OpenAIBackendAPI:
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
         }
-        thinking_effort = config.image_thinking_effort
-        if thinking_effort:
-            payload["thinking_effort"] = thinking_effort
         path = "/backend-api/f/conversation"
         response = self.session.post(
             self.base_url + path,
@@ -2872,9 +2874,16 @@ class OpenAIBackendAPI:
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements()
         self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+        conduit_token, parent_message_id = self._prepare_image_conversation(prompt, requirements, model)
         self._report_progress("starting_generation")
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        response = self._start_image_generation(
+            prompt,
+            requirements,
+            conduit_token,
+            model,
+            references,
+            parent_message_id=parent_message_id,
+        )
         self._report_progress("generating")
         try:
             yield from iter_sse_payloads(response)

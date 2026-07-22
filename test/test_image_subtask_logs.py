@@ -152,7 +152,7 @@ class ImageTaskRegistryTests(unittest.TestCase):
 
         self.assertIs(select.call_args.kwargs["cancel_event"], event)
         self.assertIsNone(select.call_args.kwargs["source_type"])
-        self.assertEqual(select.call_args.kwargs["excluded_source_types"], ("codex",))
+        self.assertNotIn("codex", select.call_args.kwargs["excluded_source_types"])
         mark.assert_called_once_with("token-1", False)
 
     def test_account_assignment_moves_queued_log_to_running(self) -> None:

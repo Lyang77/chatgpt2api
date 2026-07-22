@@ -1423,7 +1423,7 @@ def _generate_single_image_with_context(
                     plan_type=plan_type,
                     source_type=None,
                     plan_types=None,
-                    excluded_source_types=("codex",),
+                    excluded_source_types=(),
                     fallback_source_type="codex",
                     fallback_plan_types=("plus", "team", "pro"),
                     cancel_event=context.cancel_event if context is not None else None,
