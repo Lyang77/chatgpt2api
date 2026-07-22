@@ -280,6 +280,102 @@ class CodexTextTransportTests(unittest.TestCase):
 
         self.assertNotIn(sensitive_reasoning, str(raised.exception))
 
+    def test_codex_text_failure_events_preserve_sanitized_diagnostics(self) -> None:
+        cases = [
+            (
+                {
+                    "type": "error",
+                    "response_id": "resp_error",
+                    "error": {
+                        "type": "upstream_error",
+                        "code": "rate_limit_exceeded",
+                        "message": (
+                            "request failed: Bearer secret-token "
+                            "data:image/png;base64,AAAA"
+                        ),
+                    },
+                },
+                {
+                    "event_type": "error",
+                    "type": "upstream_error",
+                    "code": "rate_limit_exceeded",
+                    "message": (
+                        "request failed: Bearer [redacted] "
+                        "data:image/[redacted];base64,[redacted]"
+                    ),
+                    "response_id": "resp_error",
+                },
+            ),
+            (
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_failed",
+                        "status": "failed",
+                        "error": {
+                            "type": "server_error",
+                            "code": "upstream_unavailable",
+                            "message": "upstream unavailable",
+                        },
+                    },
+                },
+                {
+                    "event_type": "response.failed",
+                    "type": "server_error",
+                    "code": "upstream_unavailable",
+                    "message": "upstream unavailable",
+                    "response_id": "resp_failed",
+                },
+            ),
+            (
+                {
+                    "type": "response.incomplete",
+                    "response": {
+                        "id": "resp_incomplete",
+                        "status": "incomplete",
+                        "incomplete_details": {"reason": "max_output_tokens"},
+                    },
+                },
+                {
+                    "event_type": "response.incomplete",
+                    "response_id": "resp_incomplete",
+                    "incomplete_reason": "max_output_tokens",
+                },
+            ),
+            (
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_cancelled",
+                        "status": "cancelled",
+                        "error": {
+                            "type": "cancelled",
+                            "message": "request cancelled",
+                        },
+                    },
+                },
+                {
+                    "event_type": "response.completed",
+                    "type": "cancelled",
+                    "message": "request cancelled",
+                    "response_id": "resp_cancelled",
+                },
+            ),
+        ]
+
+        for event, expected in cases:
+            with self.subTest(event_type=event["type"]):
+                with self.assertRaises(codex_text.CodexTextGenerationError) as raised:
+                    list(codex_text._codex_text_event_deltas(iter([event])))
+
+                self.assertEqual(raised.exception.diagnostic_detail, expected)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"Codex text generation failed: {event['type']}",
+                )
+                self.assertNotIn("secret-token", str(raised.exception))
+                self.assertNotIn("AAAA", str(raised.exception))
+
     def test_codex_log_preview_redacts_data_urls_and_authorization(self) -> None:
         preview = OpenAIBackendAPI._codex_body_preview({
             "image_url": "data:image/png;base64,AAAA",

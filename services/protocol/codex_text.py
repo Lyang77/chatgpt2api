@@ -10,6 +10,12 @@ from services.openai_backend_api import OpenAIBackendAPI
 from utils.helper import CODEX_TEXT_DEFAULT_REASONING_EFFORT, CODEX_TEXT_MODEL
 
 
+class CodexTextGenerationError(RuntimeError):
+    def __init__(self, event_type: str, diagnostic_detail: dict[str, object]) -> None:
+        super().__init__(f"Codex text generation failed: {event_type}")
+        self.diagnostic_detail = diagnostic_detail
+
+
 @dataclass
 class CodexTextRequest:
     model: str
@@ -135,6 +141,49 @@ def _unseen_text(emitted: str, candidate: str) -> str:
     return candidate
 
 
+def _clean_codex_diagnostic(candidates: dict[str, object]) -> dict[str, object]:
+    limits = {
+        "event_type": 200,
+        "type": 200,
+        "code": 200,
+        "message": 1000,
+        "response_id": 200,
+        "incomplete_reason": 200,
+    }
+    result: dict[str, object] = {}
+    for key, limit in limits.items():
+        value = candidates.get(key)
+        if not isinstance(value, (str, int, float, bool)):
+            continue
+        cleaned = OpenAIBackendAPI._codex_log_value(value, limit)
+        if cleaned in {None, ""}:
+            continue
+        result[key] = cleaned
+    return result
+
+
+def _codex_failure_diagnostic(event: dict[str, Any]) -> dict[str, object]:
+    event_type = str(event.get("type") or "")
+    raw_response = event.get("response")
+    response = raw_response if isinstance(raw_response, dict) else {}
+    raw_error = event.get("error")
+    if not isinstance(raw_error, dict):
+        raw_error = response.get("error")
+    error = raw_error if isinstance(raw_error, dict) else {}
+    raw_incomplete = event.get("incomplete_details")
+    if not isinstance(raw_incomplete, dict):
+        raw_incomplete = response.get("incomplete_details")
+    incomplete = raw_incomplete if isinstance(raw_incomplete, dict) else {}
+    return _clean_codex_diagnostic({
+        "event_type": event_type,
+        "type": error.get("type"),
+        "code": error.get("code"),
+        "message": error.get("message"),
+        "response_id": event.get("response_id") or response.get("id") or event.get("id"),
+        "incomplete_reason": incomplete.get("reason"),
+    })
+
+
 def _codex_text_event_deltas(events: Iterator[dict[str, Any]]) -> Iterator[str]:
     emitted = ""
     completed = False
@@ -143,7 +192,7 @@ def _codex_text_event_deltas(events: Iterator[dict[str, Any]]) -> Iterator[str]:
             continue
         event_type = str(event.get("type") or "")
         if event_type in {"response.failed", "response.incomplete", "error"}:
-            raise RuntimeError(f"Codex text generation failed: {event_type}")
+            raise CodexTextGenerationError(event_type, _codex_failure_diagnostic(event))
         if event_type == "response.output_text.delta":
             raw_delta = event.get("delta")
             if isinstance(raw_delta, dict):
@@ -162,7 +211,7 @@ def _codex_text_event_deltas(events: Iterator[dict[str, Any]]) -> Iterator[str]:
                 "incomplete",
                 "cancelled",
             }:
-                raise RuntimeError("Codex text generation failed: response.completed")
+                raise CodexTextGenerationError(event_type, _codex_failure_diagnostic(event))
             completed = True
             candidate = "".join(_completed_output_texts(response))
         else:
