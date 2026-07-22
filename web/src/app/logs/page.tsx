@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ChevronLeft, ChevronRight, Copy, Database, FileText, ImageIcon, LoaderCircle, RefreshCw, Search, Trash2 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { DateRangeFilter } from "@/components/date-range-filter";
@@ -17,6 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, stopSystemLog, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { extractLogResultContent } from "@/lib/log-detail-content";
+import { readLogFilters, writeLogFilters, type LogFilters } from "@/lib/log-filters";
 import { formatLogDuration } from "@/lib/log-duration";
 import { getImageLogSummary } from "@/lib/image-log-summary";
 
@@ -24,11 +26,6 @@ const LogType = {
   Call: "call",
   Account: "account",
 } as const;
-
-const typeLabels: Record<string, string> = {
-  [LogType.Call]: "调用日志",
-  [LogType.Account]: "账号管理日志",
-};
 
 function getDetailText(item: SystemLog, key: string) {
   const value = item.detail?.[key];
@@ -94,6 +91,7 @@ function getStatus(item: SystemLog) {
 }
 
 function LogsContent() {
+  const router = useRouter();
   const [items, setItems] = useState<SystemLog[]>([]);
   const [now, setNow] = useState(() => Date.now());
   const [type, setType] = useState<string>(LogType.Call);
@@ -122,6 +120,7 @@ function LogsContent() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
+  const [filtersReady, setFiltersReady] = useState(false);
   const responseImageUrls = getResponseImageUrls(detailLog);
   const requestImageUrls = getRequestImageUrls(detailLog);
   const imageLogSummary = getImageLogSummary(detailLog?.detail);
@@ -135,6 +134,25 @@ function LogsContent() {
   const currentRows = items;
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const currentPageSelected = currentRows.length > 0 && currentRows.every((item) => selectedSet.has(item.id));
+
+  const getCurrentFilters = (overrides: Partial<LogFilters> = {}): LogFilters => ({
+    type: type === LogType.Account ? LogType.Account : LogType.Call,
+    startDate,
+    endDate,
+    keyName,
+    accountEmail,
+    status,
+    summary,
+    model,
+    endpoint,
+    batchId,
+    ...overrides,
+  });
+
+  const syncFiltersToUrl = (overrides?: Partial<LogFilters>) => {
+    const query = writeLogFilters(getCurrentFilters(overrides));
+    router.replace(query ? `/logs?${query}` : "/logs", { scroll: false });
+  };
 
   const loadLogs = async (targetPage?: number, targetPageSize?: number) => {
     setIsLoading(true);
@@ -252,9 +270,26 @@ function LogsContent() {
   };
 
   useEffect(() => {
+    const initialFilters = readLogFilters(new URLSearchParams(window.location.search));
+    setType(initialFilters.type);
+    setStartDate(initialFilters.startDate);
+    setEndDate(initialFilters.endDate);
+    setKeyName(initialFilters.keyName);
+    setAccountEmail(initialFilters.accountEmail);
+    setStatus(initialFilters.status);
+    setSummary(initialFilters.summary);
+    setModel(initialFilters.model);
+    setEndpoint(initialFilters.endpoint);
+    setBatchId(initialFilters.batchId);
+    setFiltersReady(true);
+  }, []);
+
+  useEffect(() => {
+    if (!filtersReady) return;
     setPage(1);
+    syncFiltersToUrl();
     void loadLogs(1);
-  }, [type, startDate, endDate]);
+  }, [filtersReady, type, startDate, endDate]);
 
   useEffect(() => {
     if (!hasActiveCallLogs) return;
@@ -317,7 +352,7 @@ function LogsContent() {
           <Button variant="outline" onClick={clearFilters} className="h-10 rounded-xl border-stone-200 bg-white px-4 text-stone-700">
             清除筛选条件
           </Button>
-          <Button onClick={() => { setPage(1); void loadLogs(1); }} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
+          <Button onClick={() => { setPage(1); syncFiltersToUrl(); void loadLogs(1); }} disabled={isLoading} className="h-10 rounded-xl bg-stone-950 px-4 text-white hover:bg-stone-800">
             {isLoading ? <LoaderCircle className="size-4 animate-spin" /> : <Search className="size-4" />}
             查询
           </Button>
@@ -355,9 +390,9 @@ function LogsContent() {
                 <TableRow>
                   <TableHead className="w-12"></TableHead>
                   <TableHead>时间</TableHead>
-                  <TableHead>类型</TableHead>
                   {isCallLog ? <TableHead>令牌名称</TableHead> : null}
                   {isCallLog ? <TableHead>执行账号</TableHead> : null}
+                  {isCallLog ? <TableHead>模型</TableHead> : null}
                   {isCallLog ? <TableHead>调用耗时</TableHead> : null}
                   {isCallLog ? <TableHead>状态</TableHead> : null}
                   {isCallLog ? <TableHead className="w-36">图片</TableHead> : null}
@@ -374,9 +409,9 @@ function LogsContent() {
                         <Checkbox checked={selectedSet.has(item.id)} onCheckedChange={(checked) => toggleIds([item.id], Boolean(checked))} />
                       </TableCell>
                       <TableCell className="whitespace-nowrap">{item.time}</TableCell>
-                      <TableCell><Badge variant="secondary" className="rounded-md">{typeLabels[item.type] || item.type}</Badge></TableCell>
                       {isCallLog ? <TableCell>{getDetailText(item, "key_name")}</TableCell> : null}
                       {isCallLog ? <TableCell className="max-w-[160px] truncate">{getDetailText(item, "account_email")}</TableCell> : null}
+                      {isCallLog ? <TableCell className="max-w-[160px] truncate" title={getDetailText(item, "model")}>{getDetailText(item, "model")}</TableCell> : null}
                       {isCallLog ? <TableCell>{formatLogDuration(item, now)}</TableCell> : null}
                       {isCallLog ? (
                         <TableCell>
@@ -541,7 +576,7 @@ function LogsContent() {
                             <Copy className="size-4" />
                           </button>
                         </div>
-                        <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                        <pre className="whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-sm leading-6 text-stone-700">
                           {responseResult.text}
                         </pre>
                         {responseTextTruncated ? (
@@ -571,7 +606,7 @@ function LogsContent() {
                             <Copy className="size-4" />
                           </button>
                         </div>
-                        <pre className="max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                        <pre className="whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-sm leading-6 text-stone-700">
                           {getDetailValue(detailLog, "request_text")}
                         </pre>
                       </section>
@@ -584,7 +619,7 @@ function LogsContent() {
 
                 {detailTab === "raw" ? (
                   <div className="p-4">
-                    <pre className="max-h-[460px] overflow-auto whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-xs leading-5 text-stone-700">
+                    <pre className="whitespace-pre-wrap break-words rounded-md bg-stone-50 p-4 text-xs leading-5 text-stone-700">
                       {JSON.stringify(detailLog?.detail || {}, null, 2)}
                     </pre>
                   </div>
