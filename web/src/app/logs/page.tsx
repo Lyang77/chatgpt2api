@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { deleteSystemLogs, fetchSystemLogDetail, fetchSystemLogs, stopSystemLog, type SystemLog } from "@/lib/api";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+import { getExecutionDiagnosticRows, getRequestMetaRows, type LogDiagnosticRow } from "@/lib/log-diagnostics";
 import { extractLogResultContent } from "@/lib/log-detail-content";
 import { readLogFilters, writeLogFilters, type LogFilters } from "@/lib/log-filters";
 import { formatLogDuration } from "@/lib/log-duration";
@@ -80,6 +81,28 @@ function DetailImageGallery({ title, urls, onOpen }: { title: string; urls: stri
   );
 }
 
+function DiagnosticGrid({ title, rows }: { title: string; rows: LogDiagnosticRow[] }) {
+  if (rows.length === 0) return null;
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-medium text-stone-800">{title}</h3>
+      <div className="grid overflow-hidden rounded-lg border border-stone-200 bg-stone-50 sm:grid-cols-2 lg:grid-cols-3">
+        {rows.map((row) => (
+          <div
+            key={row.key}
+            className={`${row.multiline ? "sm:col-span-2 lg:col-span-3" : ""} min-w-0 border-b border-r border-stone-100 px-4 py-3`}
+          >
+            <div className="text-xs text-stone-400">{row.label}</div>
+            <div className={`${row.multiline ? "whitespace-pre-wrap" : ""} mt-1 break-words text-sm font-medium text-stone-800`}>
+              {row.value}
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function getStatus(item: SystemLog) {
   const status = item.detail?.status;
   if (status === "success") return "成功";
@@ -124,6 +147,8 @@ function LogsContent() {
   const responseImageUrls = getResponseImageUrls(detailLog);
   const requestImageUrls = getRequestImageUrls(detailLog);
   const imageLogSummary = getImageLogSummary(detailLog?.detail);
+  const requestMetaRows = getRequestMetaRows(detailLog?.detail);
+  const executionDiagnosticRows = getExecutionDiagnosticRows(detailLog?.detail);
   const responseResult = useMemo(
     () => extractLogResultContent(detailLog?.detail?.response_text),
     [detailLog],
@@ -528,6 +553,7 @@ function LogsContent() {
                   </div>
                 ))}
               </div>
+              <DiagnosticGrid title="执行诊断" rows={executionDiagnosticRows} />
 
               <div className="overflow-hidden rounded-lg border border-stone-200 bg-white">
                 <div className="flex border-b border-stone-100 px-3">
@@ -592,6 +618,7 @@ function LogsContent() {
 
                 {detailTab === "request" ? (
                   <div className="space-y-5 p-4">
+                    <DiagnosticGrid title="请求参数" rows={requestMetaRows} />
                     {getDetailValue(detailLog, "request_text") ? (
                       <section className="space-y-3">
                         <div className="flex items-center justify-between gap-3">
@@ -610,7 +637,7 @@ function LogsContent() {
                           {getDetailValue(detailLog, "request_text")}
                         </pre>
                       </section>
-                    ) : requestImageUrls.length === 0 ? (
+                    ) : requestImageUrls.length === 0 && requestMetaRows.length === 0 ? (
                       <div className="py-12 text-center text-sm text-stone-400">该调用没有记录请求内容</div>
                     ) : null}
                     <DetailImageGallery title="请求图片" urls={requestImageUrls} onOpen={(index) => openImages(requestImageUrls, index)} />
