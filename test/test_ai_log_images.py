@@ -223,6 +223,10 @@ class AiLogImageTests(unittest.TestCase):
             _CapturedCall.instances[0].kwargs.get("request_meta"),
             {
                 "mode": "edit",
+                "quality": "auto",
+                "n": 1,
+                "output_format": "png",
+                "response_format": "b64_json",
                 "reference_image_count": 1,
                 "mask_image_count": 1,
             },

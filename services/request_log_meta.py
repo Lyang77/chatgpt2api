@@ -78,14 +78,17 @@ def build_image_request_meta(
     reference_image_count: int | None = None,
     mask_image_count: int | None = None,
 ) -> dict[str, Any]:
-    meta: dict[str, Any] = {"mode": "edit" if mode == "edit" else "generate"}
-    for key in ("size", "quality", "output_format", "response_format", "client_task_id"):
+    meta: dict[str, Any] = {
+        "mode": "edit" if mode == "edit" else "generate",
+        "quality": _safe_string(payload.get("quality")) or "auto",
+        "n": _safe_count(payload.get("n")) or 1,
+        "output_format": _safe_string(payload.get("output_format")) or "png",
+        "response_format": _safe_string(payload.get("response_format")) or "b64_json",
+    }
+    for key in ("size", "client_task_id"):
         value = _safe_string(payload.get(key))
         if value is not None:
             meta[key] = value
-    count = _safe_count(payload.get("n"))
-    if count is not None:
-        meta["n"] = count
     if isinstance(payload.get("stream"), bool):
         meta["stream"] = payload["stream"]
 

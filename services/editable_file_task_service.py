@@ -13,6 +13,7 @@ from services.config import DATA_DIR
 from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import EDITABLE_FILE_MODEL, OpenAIBackendAPI
+from services.request_log_meta import build_text_request_meta
 from utils.helper import new_uuid
 
 TASK_STATUS_QUEUED = "queued"
@@ -130,6 +131,14 @@ class EditableFileTaskService:
         started = time.time()
         token = ""
         account_email = ""
+        request_meta = build_text_request_meta(
+            {
+                "client_task_id": key.rsplit(":", 1)[-1],
+                "prompt": prompt,
+                "base64_images": base64_images,
+            },
+            protocol="editable_file",
+        )
         self._update_task(key, status=TASK_STATUS_RUNNING, error="", started_ts=started)
         backend = None
         try:
@@ -144,11 +153,11 @@ class EditableFileTaskService:
             account_service.mark_text_used(token)
             data = {"conversation_id": result.conversation_id, "primary_url": _file_url(result.primary_path, base_url), "zip_url": _file_url(result.zip_path, base_url)}
             self._update_task(key, status=TASK_STATUS_SUCCESS, result=data, account_email=account_email, error="", ended_ts=time.time())
-            self._log_call(identity, kind, started, request_text(prompt), account_email=account_email, result=data)
+            self._log_call(identity, kind, started, request_text(prompt), account_email=account_email, result=data, request_meta=request_meta)
         except Exception as exc:
             error = str(exc) or "editable file task failed"
             self._update_task(key, status=TASK_STATUS_ERROR, error=error, account_email=account_email, ended_ts=time.time())
-            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error, account_email=account_email)
+            self._log_call(identity, kind, started, request_text(prompt), status="failed", error=error, account_email=account_email, request_meta=request_meta)
         finally:
             if backend is not None:
                 backend.close()
@@ -231,6 +240,7 @@ class EditableFileTaskService:
             error: str = "",
             account_email: str = "",
             result: dict[str, str] | None = None,
+            request_meta: dict[str, Any] | None = None,
     ) -> None:
         detail = {
             "key_id": identity.get("id"),
@@ -251,6 +261,8 @@ class EditableFileTaskService:
             detail["error"] = error
         if result:
             detail["result"] = result
+        if request_meta:
+            detail["request_meta"] = dict(request_meta)
         try:
             log_service.add(LOG_TYPE_CALL, f"{kind.upper()}生成任务{'失败' if status == 'failed' else '完成'}", detail)
         except Exception:

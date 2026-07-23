@@ -13,6 +13,7 @@ from services.content_filter import request_text
 from services.log_service import LOG_TYPE_CALL, log_service
 from services.openai_backend_api import ImagePollTimeoutError
 from services.protocol import openai_v1_image_edit, openai_v1_image_generations
+from services.request_log_meta import build_image_request_meta
 
 TASK_STATUS_QUEUED = "queued"
 TASK_STATUS_RUNNING = "running"
@@ -160,6 +161,7 @@ class ImageTaskService:
         base_url: str = "",
     ) -> dict[str, Any]:
         payload = {
+            "client_task_id": client_task_id,
             "prompt": prompt,
             "model": model,
             "size": size,
@@ -184,6 +186,7 @@ class ImageTaskService:
         masks: list[tuple[bytes, str, str]] | None = None,
     ) -> dict[str, Any]:
         payload = {
+            "client_task_id": client_task_id,
             "prompt": prompt,
             "images": images or [],
             "mask": masks or [],
@@ -297,6 +300,7 @@ class ImageTaskService:
         model: str,
     ) -> None:
         started = time.time()
+        request_meta = build_image_request_meta(payload, mode=mode)
         self._update_task(key, status=TASK_STATUS_RUNNING, error="")
         # 创建进度回调，每个步骤完成后更新任务状态
         def progress_callback(step: str) -> None:
@@ -353,6 +357,7 @@ class ImageTaskService:
                 account_email=account_email,
                 actual_image_count=len(merged_data),
                 completion_reason=completion_reason,
+                request_meta=request_meta,
             )
         except ImagePollTimeoutError as exc:
             merged_data = self._task_data(key)
@@ -377,6 +382,7 @@ class ImageTaskService:
                     account_email=_clean(getattr(exc, "account_email", "")),
                     actual_image_count=len(merged_data),
                     completion_reason="timeout_with_results",
+                    request_meta=request_meta,
                 )
                 return
             self._finish_task_error(key, identity, mode, model, started, payload, exc)
@@ -413,6 +419,7 @@ class ImageTaskService:
             account_email=account_email,
             actual_image_count=0,
             completion_reason="failed",
+            request_meta=build_image_request_meta(payload, mode=mode),
         )
 
     def _log_call(
@@ -430,6 +437,7 @@ class ImageTaskService:
         account_email: str = "",
         actual_image_count: int = 0,
         completion_reason: str = "",
+        request_meta: dict[str, Any] | None = None,
     ) -> None:
         endpoint = "/v1/images/edits" if mode == "edit" else "/v1/images/generations"
         summary_prefix = "图生图" if mode == "edit" else "文生图"
@@ -447,6 +455,8 @@ class ImageTaskService:
         }
         if completion_reason:
             detail["completion_reason"] = completion_reason
+        if request_meta:
+            detail["request_meta"] = dict(request_meta)
         if request_preview:
             detail["request_text"] = request_preview
         if error:
@@ -604,6 +614,17 @@ class ImageTaskService:
         """后台线程：继续轮询已有 conversation_id 的图片结果。"""
         started = time.time()
         backend = None
+        with self._lock:
+            task = dict(self._tasks.get(key) or {})
+        request_meta = build_image_request_meta(
+            {
+                "client_task_id": task.get("id"),
+                "size": task.get("size"),
+                "quality": task.get("quality"),
+                "response_format": "url",
+            },
+            mode=mode,
+        )
         try:
             from services.openai_backend_api import OpenAIBackendAPI
             from services.protocol.conversation import format_image_result
@@ -673,6 +694,7 @@ class ImageTaskService:
                 urls=_collect_image_urls(data),
                 actual_image_count=len(data),
                 completion_reason=completion_reason,
+                request_meta=request_meta,
             )
         except Exception as exc:
             error_message = str(exc) or "resume poll failed"
@@ -686,6 +708,7 @@ class ImageTaskService:
                 "调用失败（续轮询）",
                 status="failed",
                 error=error_message,
+                request_meta=request_meta,
             )
         finally:
             if backend is not None:

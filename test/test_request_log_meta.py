@@ -40,6 +40,19 @@ class RequestLogMetaTests(unittest.TestCase):
             },
         )
 
+    def test_image_meta_reports_effective_safe_defaults(self) -> None:
+        self.assertEqual(
+            build_image_request_meta({"client_task_id": "task-2"}, mode="generate"),
+            {
+                "mode": "generate",
+                "quality": "auto",
+                "n": 1,
+                "output_format": "png",
+                "response_format": "b64_json",
+                "client_task_id": "task-2",
+            },
+        )
+
     def test_chat_meta_counts_structure_and_omits_secrets(self) -> None:
         payload = {
             "prompt": "fallback prompt",

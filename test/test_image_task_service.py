@@ -71,6 +71,66 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(task["data"][0]["url"], "http://example.test/image.png")
             self.assertEqual(calls, 1)
 
+    def test_generation_success_log_records_request_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json")
+            with mock.patch("services.image_task_service.log_service.add") as add_log:
+                service.submit_generation(
+                    OWNER,
+                    client_task_id="logged-task",
+                    prompt="cat",
+                    model="gpt-image-2",
+                    size="1536x1024",
+                    quality="high",
+                    base_url="http://local.test",
+                )
+                wait_for_task(service, OWNER, "logged-task", "success")
+
+            detail = add_log.call_args.args[2]
+            self.assertEqual(detail["request_meta"], {
+                "mode": "generate",
+                "size": "1536x1024",
+                "quality": "high",
+                "n": 1,
+                "output_format": "png",
+                "response_format": "url",
+                "client_task_id": "logged-task",
+            })
+
+    def test_edit_failure_log_records_request_metadata_without_image_bytes(self):
+        def failed_handler(_payload):
+            raise RuntimeError("upstream failed")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = self.make_service(Path(tmp_dir) / "image_tasks.json", failed_handler)
+            with mock.patch("services.image_task_service.log_service.add") as add_log:
+                service.submit_edit(
+                    OWNER,
+                    client_task_id="failed-edit",
+                    prompt="edit cat",
+                    model="gpt-image-2",
+                    size="1024x1024",
+                    quality="medium",
+                    base_url="http://local.test",
+                    images=[(b"SECRET-IMAGE", "cat.png", "image/png")],
+                    masks=[(b"SECRET-MASK", "mask.png", "image/png")],
+                )
+                wait_for_task(service, OWNER, "failed-edit", "error")
+
+            detail = add_log.call_args.args[2]
+            self.assertEqual(detail["request_meta"], {
+                "mode": "edit",
+                "size": "1024x1024",
+                "quality": "medium",
+                "n": 1,
+                "output_format": "png",
+                "response_format": "url",
+                "client_task_id": "failed-edit",
+                "reference_image_count": 1,
+                "mask_image_count": 1,
+            })
+            self.assertNotIn("SECRET", repr(detail["request_meta"]))
+
     def test_different_owner_cannot_query_task(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             service = self.make_service(Path(tmp_dir) / "image_tasks.json")
@@ -225,6 +285,7 @@ class ImageTaskServiceTests(unittest.TestCase):
                     "status": "running",
                     "mode": "generate",
                     "model": "gpt-image-2",
+                    "size": "1024x1536",
                     "quality": "auto",
                     "data": [],
                     "created_at": "2026-07-13 00:00:00",
@@ -268,6 +329,15 @@ class ImageTaskServiceTests(unittest.TestCase):
             self.assertEqual(completed["actual_image_count"], 2)
             self.assertEqual(completed["completion_reason"], "upstream_completed")
             self.assertEqual(log_call.call_args.kwargs["actual_image_count"], 2)
+            self.assertEqual(log_call.call_args.kwargs["request_meta"], {
+                "mode": "generate",
+                "size": "1024x1536",
+                "quality": "auto",
+                "n": 1,
+                "output_format": "png",
+                "response_format": "url",
+                "client_task_id": "resume-task",
+            })
 
 
 if __name__ == "__main__":
