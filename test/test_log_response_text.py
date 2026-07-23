@@ -54,6 +54,29 @@ class LoggedCallResponseTextTests(unittest.TestCase):
 
         self.assertEqual(self._last_detail().get("response_text"), "hello from assistant")
 
+    def test_logged_call_records_safe_request_metadata(self) -> None:
+        request_meta = {"stream": True, "message_count": 2, "role_counts": {"user": 2}}
+        call = LoggedCall(
+            IDENTITY,
+            "/v1/chat/completions",
+            "auto",
+            "文本生成",
+            request_text="say hello",
+            request_meta=request_meta,
+        )
+
+        call.log("调用完成", {"choices": [{"message": {"content": "hello"}}]})
+        request_meta["message_count"] = 99
+
+        full_detail = self._last_detail()
+        listed_detail = log_module.log_service.list(type="call")["items"][0]["detail"]
+        self.assertEqual(full_detail.get("request_meta"), {
+            "stream": True,
+            "message_count": 2,
+            "role_counts": {"user": 2},
+        })
+        self.assertEqual(listed_detail.get("request_meta"), full_detail.get("request_meta"))
+
     def test_responses_log_records_output_text(self) -> None:
         call = LoggedCall(IDENTITY, "/v1/responses", "auto", "Responses", request_text="say hello")
 

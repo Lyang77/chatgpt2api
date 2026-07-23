@@ -776,6 +776,7 @@ class LoggedCall:
     request_text: str = ""
     request_shape: dict[str, int] | None = None
     request_urls: list[str] | None = None
+    request_meta: dict[str, Any] | None = None
     image_base_url: str = ""
     skip_final_log: bool = False
 
@@ -904,6 +905,8 @@ class LoggedCall:
             detail["request_text"] = request_excerpt
         if self.request_shape:
             detail["request_shape"] = self.request_shape
+        if self.request_meta:
+            detail["request_meta"] = dict(self.request_meta)
         if self.request_urls:
             detail["request_urls"] = list(dict.fromkeys(url for url in self.request_urls if url))
         full_response_text = response_text or _collect_response_text(result)

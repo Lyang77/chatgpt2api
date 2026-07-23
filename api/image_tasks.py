@@ -9,6 +9,7 @@ from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request
 from services.image_task_service import image_task_service
 from services.log_service import LoggedCall
+from services.request_log_meta import build_image_request_meta
 
 
 class ImageGenerationTaskRequest(BaseModel):
@@ -53,7 +54,15 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
     ):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/api/image-tasks/generations", body.model, "文生图任务", request_text=body.prompt), body.prompt)
+        request_meta = build_image_request_meta(body.model_dump(mode="python"), mode="generate")
+        await filter_or_log(LoggedCall(
+            identity,
+            "/api/image-tasks/generations",
+            body.model,
+            "文生图任务",
+            request_text=body.prompt,
+            request_meta=request_meta,
+        ), body.prompt)
         try:
             return await run_in_threadpool(
                 image_task_service.submit_generation,
@@ -80,7 +89,20 @@ def create_router() -> APIRouter:
             raise HTTPException(status_code=400, detail={"error": "client_task_id is required"})
         prompt = str(payload["prompt"])
         model = str(payload["model"])
-        await filter_or_log(LoggedCall(identity, "/api/image-tasks/edits", model, "图生图任务", request_text=prompt), prompt)
+        request_meta = build_image_request_meta(
+            payload,
+            mode="edit",
+            reference_image_count=len(image_sources),
+            mask_image_count=len(mask_sources),
+        )
+        await filter_or_log(LoggedCall(
+            identity,
+            "/api/image-tasks/edits",
+            model,
+            "图生图任务",
+            request_text=prompt,
+            request_meta=request_meta,
+        ), prompt)
         images = await read_image_sources(image_sources)
         masks = await read_image_sources(mask_sources) if mask_sources else None
         try:

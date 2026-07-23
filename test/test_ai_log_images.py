@@ -61,6 +61,14 @@ class AiLogImageTests(unittest.TestCase):
             _CapturedCall.instances[0].kwargs.get("request_urls"),
             ["https://example.test/request.png"],
         )
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {
+                "message_count": 1,
+                "role_counts": {"user": 1},
+                "image_input_count": 1,
+            },
+        )
 
     def test_responses_records_request_image_urls(self) -> None:
         response = self.client.post(
@@ -79,6 +87,115 @@ class AiLogImageTests(unittest.TestCase):
         self.assertEqual(
             _CapturedCall.instances[0].kwargs.get("request_urls"),
             ["https://example.test/request.png"],
+        )
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {"input_item_count": 1, "image_input_count": 1},
+        )
+
+    def test_messages_records_request_metadata(self) -> None:
+        response = self.client.post(
+            "/v1/messages",
+            headers=AUTH_HEADERS,
+            json={
+                "model": "gpt-5-5",
+                "system": "system",
+                "messages": [{"role": "user", "content": "hello"}],
+                "tools": [{"name": "lookup", "input_schema": {"type": "object"}}],
+                "max_tokens": 500,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {
+                "max_tokens": 500,
+                "tool_count": 1,
+                "message_count": 1,
+                "role_counts": {"user": 1},
+                "system_chars": len("system"),
+            },
+        )
+
+    def test_search_records_request_metadata(self) -> None:
+        response = self.client.post(
+            "/v1/search",
+            headers=AUTH_HEADERS,
+            json={"prompt": "find current docs"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {"prompt_chars": len("find current docs")},
+        )
+
+    def test_editable_file_tasks_record_request_metadata(self) -> None:
+        with (
+            mock.patch.object(ai_module.editable_file_task_service, "submit_ppt", return_value={"id": "deck-1"}),
+            mock.patch.object(ai_module.editable_file_task_service, "submit_psd", return_value={"id": "psd-1"}),
+        ):
+            ppt_response = self.client.post(
+                "/v1/ppt/generations",
+                headers=AUTH_HEADERS,
+                json={
+                    "prompt": "make slides",
+                    "client_task_id": "deck-1",
+                    "base64_images": ["SECRET"],
+                },
+            )
+            psd_response = self.client.post(
+                "/v1/psd/generations",
+                headers=AUTH_HEADERS,
+                json={"prompt": "make psd", "client_task_id": "psd-1"},
+            )
+
+        self.assertEqual(ppt_response.status_code, 200, ppt_response.text)
+        self.assertEqual(psd_response.status_code, 200, psd_response.text)
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {
+                "client_task_id": "deck-1",
+                "reference_image_count": 1,
+                "prompt_chars": len("make slides"),
+            },
+        )
+        self.assertEqual(
+            _CapturedCall.instances[1].kwargs.get("request_meta"),
+            {
+                "client_task_id": "psd-1",
+                "reference_image_count": 0,
+                "prompt_chars": len("make psd"),
+            },
+        )
+
+    def test_image_generation_records_request_metadata(self) -> None:
+        response = self.client.post(
+            "/v1/images/generations",
+            headers=AUTH_HEADERS,
+            json={
+                "prompt": "draw",
+                "model": "gpt-image-2",
+                "size": "1536x1024",
+                "quality": "high",
+                "n": 2,
+                "output_format": "webp",
+                "response_format": "url",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {
+                "mode": "generate",
+                "size": "1536x1024",
+                "quality": "high",
+                "n": 2,
+                "output_format": "webp",
+                "response_format": "url",
+            },
         )
 
     def test_image_edit_records_primary_and_mask_images(self) -> None:
@@ -101,6 +218,14 @@ class AiLogImageTests(unittest.TestCase):
         self.assertEqual(
             _CapturedCall.instances[0].request_urls,
             ["http://app.test/primary.png", "http://app.test/mask.png"],
+        )
+        self.assertEqual(
+            _CapturedCall.instances[0].kwargs.get("request_meta"),
+            {
+                "mode": "edit",
+                "reference_image_count": 1,
+                "mask_image_count": 1,
+            },
         )
 
 

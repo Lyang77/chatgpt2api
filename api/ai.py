@@ -11,6 +11,7 @@ from api.support import require_identity, resolve_image_base_url
 from services.content_filter import check_request, request_shape, request_text
 from services.editable_file_task_service import editable_file_task_service
 from services.log_service import LoggedCall, collect_request_image_input_urls, collect_request_image_urls
+from services.request_log_meta import build_image_request_meta, build_text_request_meta
 from services.protocol import (
     anthropic_v1_messages,
     openai_v1_chat_complete,
@@ -86,6 +87,7 @@ def attach_image_task_log_template(
         endpoint: str,
         model: str,
         prompt: str,
+        request_meta: dict[str, object],
         request_urls: list[str] | None = None,
 ) -> None:
     payload["image_task_log_template"] = {
@@ -95,6 +97,7 @@ def attach_image_task_log_template(
         "endpoint": endpoint,
         "model": model,
         "request_text": prompt,
+        "request_meta": dict(request_meta),
         "request_urls": list(request_urls or []),
     }
     payload["image_task_batch_id"] = uuid4().hex
@@ -120,12 +123,14 @@ def create_router() -> APIRouter:
         identity = require_identity(authorization)
         payload = body.model_dump(mode="python")
         image_base_url = resolve_image_base_url(request)
+        request_meta = build_image_request_meta(payload, mode="generate")
         attach_image_task_log_template(
             payload,
             identity,
             endpoint="/v1/images/generations",
             model=body.model,
             prompt=body.prompt,
+            request_meta=request_meta,
         )
         payload["base_url"] = image_base_url
         call = LoggedCall(
@@ -134,6 +139,7 @@ def create_router() -> APIRouter:
             body.model,
             "文生图",
             request_text=body.prompt,
+            request_meta=request_meta,
             image_base_url=image_base_url,
             skip_final_log=True,
         )
@@ -150,12 +156,19 @@ def create_router() -> APIRouter:
         prompt = str(payload["prompt"])
         model = str(payload["model"])
         image_base_url = resolve_image_base_url(request)
+        request_meta = build_image_request_meta(
+            payload,
+            mode="edit",
+            reference_image_count=len(image_sources),
+            mask_image_count=len(mask_sources),
+        )
         call = LoggedCall(
             identity,
             "/v1/images/edits",
             model,
             "文生图",
             request_text=prompt,
+            request_meta=request_meta,
             image_base_url=image_base_url,
         )
         await filter_or_log(call, prompt)
@@ -173,6 +186,7 @@ def create_router() -> APIRouter:
             endpoint="/v1/images/edits",
             model=model,
             prompt=prompt,
+            request_meta=request_meta,
             request_urls=call.request_urls,
         )
         payload["base_url"] = image_base_url
@@ -198,6 +212,7 @@ def create_router() -> APIRouter:
             request_text=request_preview,
             request_shape=request_shape(payload.get("messages")),
             request_urls=collect_request_image_urls(payload, image_base_url),
+            request_meta=build_text_request_meta(payload, protocol="chat_completions"),
             image_base_url=image_base_url,
         )
         await filter_or_log(call, request_preview)
@@ -222,6 +237,7 @@ def create_router() -> APIRouter:
             request_text=request_preview,
             request_shape=request_shape(payload.get("input")),
             request_urls=collect_request_image_urls(payload, image_base_url),
+            request_meta=build_text_request_meta(payload, protocol="responses"),
             image_base_url=image_base_url,
         )
         await filter_or_log(call, request_preview)
@@ -247,6 +263,7 @@ def create_router() -> APIRouter:
             "prompt生成",
             request_text=request_preview,
             request_urls=collect_request_image_urls(payload, image_base_url),
+            request_meta=build_text_request_meta(payload, protocol="messages"),
             image_base_url=image_base_url,
         )
         await filter_or_log(call, request_preview)
@@ -255,9 +272,17 @@ def create_router() -> APIRouter:
     @router.post("/v1/search")
     async def search(body: SearchRequest, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        call = LoggedCall(identity, "/v1/search", openai_search.MODEL, "prompt生成", request_text=body.prompt)
+        payload = body.model_dump(mode="python")
+        call = LoggedCall(
+            identity,
+            "/v1/search",
+            openai_search.MODEL,
+            "prompt生成",
+            request_text=body.prompt,
+            request_meta=build_text_request_meta(payload, protocol="search"),
+        )
         await filter_or_log(call, body.prompt)
-        return await call.run(openai_search.handle, body.model_dump(mode="python"))
+        return await call.run(openai_search.handle, payload)
 
     @router.get("/v1/editable-file-tasks")
     async def list_editable_file_tasks(ids: str = "", authorization: str | None = Header(default=None)):
@@ -276,7 +301,15 @@ def create_router() -> APIRouter:
     @router.post("/v1/ppt/generations")
     async def create_ppt_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/v1/ppt/generations", "gpt-5-5-thinking", "PPT生成任务", request_text=body.prompt), body.prompt)
+        payload = body.model_dump(mode="python")
+        await filter_or_log(LoggedCall(
+            identity,
+            "/v1/ppt/generations",
+            "gpt-5-5-thinking",
+            "PPT生成任务",
+            request_text=body.prompt,
+            request_meta=build_text_request_meta(payload, protocol="editable_file"),
+        ), body.prompt)
         return await run_in_threadpool(
             editable_file_task_service.submit_ppt,
             identity,
@@ -289,7 +322,15 @@ def create_router() -> APIRouter:
     @router.post("/v1/psd/generations")
     async def create_psd_task(body: EditableFileTaskRequest, request: Request, authorization: str | None = Header(default=None)):
         identity = require_identity(authorization)
-        await filter_or_log(LoggedCall(identity, "/v1/psd/generations", "gpt-5-5-thinking", "PSD生成任务", request_text=body.prompt), body.prompt)
+        payload = body.model_dump(mode="python")
+        await filter_or_log(LoggedCall(
+            identity,
+            "/v1/psd/generations",
+            "gpt-5-5-thinking",
+            "PSD生成任务",
+            request_text=body.prompt,
+            request_meta=build_text_request_meta(payload, protocol="editable_file"),
+        ), body.prompt)
         return await run_in_threadpool(
             editable_file_task_service.submit_psd,
             identity,
