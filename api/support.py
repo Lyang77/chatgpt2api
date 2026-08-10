@@ -5,6 +5,7 @@ from threading import Event, Thread
 
 from fastapi import HTTPException, Request
 
+from services.account_pool_alert_service import account_pool_zero_alert_monitor
 from services.account_service import account_service
 from services.auth_service import auth_service
 from services.config import config
@@ -79,32 +80,39 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
     return [sanitized for server in servers if (sanitized := sanitize_sub2api_server(server)) is not None]
 
 
+def run_limited_account_watcher_cycle() -> None:
+    try:
+        limited_tokens = account_service.list_limited_tokens()
+        normal_tokens = account_service.list_normal_tokens()
+        expiring_tokens = account_service.list_expiring_access_tokens()
+        keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
+        tokens = list(dict.fromkeys([*limited_tokens, *normal_tokens, *expiring_tokens]))
+        expiring_token_set = set(expiring_tokens)
+        keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
+        if tokens:
+            print(
+                "[account-watcher] checking "
+                f"{len(limited_tokens)} limited accounts, "
+                f"{len(normal_tokens)} normal accounts, "
+                f"{len(expiring_tokens)} expiring access tokens"
+            )
+            account_service.refresh_accounts(tokens)
+        if keepalive_tokens:
+            print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
+            result = account_service.keepalive_refresh_tokens(keepalive_tokens)
+            if result.get("errors"):
+                print(f"[account-watcher] keepalive errors: {result['errors']}")
+    finally:
+        account_pool_zero_alert_monitor.check(account_service.get_stats())
+
+
 def start_limited_account_watcher(stop_event: Event) -> Thread:
     interval_seconds = config.refresh_account_interval_minute * 60
 
     def worker() -> None:
         while not stop_event.is_set():
             try:
-                limited_tokens = account_service.list_limited_tokens()
-                normal_tokens = account_service.list_normal_tokens()
-                expiring_tokens = account_service.list_expiring_access_tokens()
-                keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
-                tokens = list(dict.fromkeys([*limited_tokens, *normal_tokens, *expiring_tokens]))
-                expiring_token_set = set(expiring_tokens)
-                keepalive_tokens = [token for token in keepalive_tokens if token not in expiring_token_set]
-                if tokens:
-                    print(
-                        "[account-watcher] checking "
-                        f"{len(limited_tokens)} limited accounts, "
-                        f"{len(normal_tokens)} normal accounts, "
-                        f"{len(expiring_tokens)} expiring access tokens"
-                    )
-                    account_service.refresh_accounts(tokens)
-                if keepalive_tokens:
-                    print(f"[account-watcher] keepalive {len(keepalive_tokens)} refresh tokens")
-                    result = account_service.keepalive_refresh_tokens(keepalive_tokens)
-                    if result.get("errors"):
-                        print(f"[account-watcher] keepalive errors: {result['errors']}")
+                run_limited_account_watcher_cycle()
             except Exception as exc:
                 print(f"[account-watcher] fail {exc}")
             stop_event.wait(interval_seconds)
