@@ -52,14 +52,14 @@ def main() -> None:
         check("slug(auto)", api._image_model_slug("auto"), "auto")
 
         # 2b) 思考档位映射（链路层）
-        check("map(未传) -> 默认极高(max)", api._map_image_thinking("", "gpt-5.6-sol"), ("gpt-5.6-sol", "max"))
-        check("map(high) -> extended", api._map_image_thinking("high", "gpt-5.6-sol"), ("gpt-5.6-sol", "extended"))
-        check("map(extended) -> extended", api._map_image_thinking("extended", "gpt-5.6-sol"), ("gpt-5.6-sol", "extended"))
-        check("map(none) -> 关闭", api._map_image_thinking("none", "gpt-5.6-sol"), ("gpt-5.6-sol", ""))
-        check("map(standard) -> 标准", api._map_image_thinking("standard", "gpt-5.6-sol"), ("gpt-5.6-sol", ""))
-        check("map(xhigh) -> 极高(max)", api._map_image_thinking("xhigh", "gpt-5.6-sol"), ("gpt-5.6-sol", "max"))
-        check("map(极高) -> 极高(max)", api._map_image_thinking("极高", "gpt-5.6-sol"), ("gpt-5.6-sol", "max"))
-        check("map(xhigh 其他模型) -> max", api._map_image_thinking("xhigh", "gpt-5-5-instant"), ("gpt-5-5-instant", "max"))
+        check("map(未传) -> 默认高(extended)", api._map_image_thinking("", "gpt-5-6-thinking"), ("gpt-5-6-thinking", "extended"))
+        check("map(high) -> extended", api._map_image_thinking("high", "gpt-5-6-thinking"), ("gpt-5-6-thinking", "extended"))
+        check("map(extended) -> extended", api._map_image_thinking("extended", "gpt-5-6-thinking"), ("gpt-5-6-thinking", "extended"))
+        check("map(none) -> 关闭", api._map_image_thinking("none", "gpt-5-6-thinking"), ("gpt-5-6-thinking", ""))
+        check("map(standard) -> 标准", api._map_image_thinking("standard", "gpt-5-6-thinking"), ("gpt-5-6-thinking", ""))
+        check("map(xhigh) -> 极高(max)", api._map_image_thinking("xhigh", "gpt-5-6-thinking"), ("gpt-5-6-thinking", "max"))
+        check("map(极高) -> 极高(max)", api._map_image_thinking("极高", "gpt-5-6-thinking"), ("gpt-5-6-thinking", "max"))
+        check("map(max) -> 极高(max)", api._map_image_thinking("max", "gpt-5-6-thinking"), ("gpt-5-6-thinking", "max"))
     finally:
         api.close()
 

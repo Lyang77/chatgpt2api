@@ -262,7 +262,7 @@ curl http://localhost:8000/v1/images/edits \
 | 字段          | 说明                                            |
 |:------------|:----------------------------------------------|
 | `model`     | 图片模型。支持 `gpt-image-2`（默认，映射上游 `gpt-5.6-sol`，与 web 端一致）、`codex-gpt-image-2`、`auto`，也可直接传上游生图 slug（`gpt-5.6-sol` / `gpt-5-5-instant` / `gpt-5-6` 等，以 `/v1/models` 返回为准） |
-| `thinking_effort` / `reasoning_effort` | 可选，思考强度档位。默认极高思考（`thinking_effort=max`，web 端抓包确认的实际值）；`none` 关闭、`standard` 标准模式、`high`/`extended` 深度思考、`xhigh`/`极高` 极高思考 |
+| `thinking_effort` / `reasoning_effort` | 可选，思考强度档位。默认高思考（`thinking_effort=extended`，web 端默认档）；`none` 关闭、`standard` 标准模式、`xhigh`/`极高`/`max` 极高思考（`thinking_effort=max`，web 端抓包确认） |
 | `prompt`    | 图片编辑提示词                                       |
 | `n`         | 生成数量，当前后端限制为 `1-4`                            |
 | `output_format` | 输出图片编码格式，支持 `png`、`jpeg`、`webp`，默认 `png`  |

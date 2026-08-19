@@ -2889,17 +2889,16 @@ class OpenAIBackendAPI:
         档位：
         - none       → 关闭思考（标准模式），模型不变、不注入 thinking
         - standard   → 标准模式，模型不变、不注入 thinking
-        - high / extended → 深度思考：模型不变 + thinking_effort=extended
-        - xhigh / 极高 / 空（未指定） → 极高思考：thinking_effort=max
-                          （web 端实际值，抓包确认）
+        - high / extended / 空（未指定） → 高思考：thinking_effort=extended（web 端默认档）
+        - xhigh / 极高 / max → 极高思考：thinking_effort=max（web 端抓包确认）
         """
         normalized = str(thinking_effort or "").strip().lower()
         if normalized in {"none", "standard"}:
             return base_model, ""
-        if normalized in {"", "xhigh", "极高"}:
-            # 极高思考（web 端 thinking_effort=max，用户默认档位）
+        if normalized in {"xhigh", "极高", "max"}:
+            # 极高思考（web 端 thinking_effort=max）
             return base_model, "max"
-        # high / extended / 其他非空值 → 深度思考
+        # 空（未指定，默认高思考）/ high / extended / 其他非空值 → 高思考
         return base_model, "extended"
 
     def _stream_picture_conversation(
