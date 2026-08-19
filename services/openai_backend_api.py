@@ -23,7 +23,17 @@ from services.account_service import account_service
 from services.config import config
 from services.proxy_service import proxy_settings
 from services.protocol.error_response import openai_error_payload
-from utils.helper import CODEX_TEXT_DEFAULT_REASONING_EFFORT, CODEX_TEXT_MODEL, UpstreamHTTPError, ensure_ok, iter_sse_payloads, new_uuid, split_image_model
+from utils.helper import (
+    CODEX_TEXT_DEFAULT_REASONING_EFFORT,
+    CODEX_TEXT_MODEL,
+    DEFAULT_IMAGE_UPSTREAM_MODEL,
+    UPSTREAM_IMAGE_MODELS,
+    UpstreamHTTPError,
+    ensure_ok,
+    iter_sse_payloads,
+    new_uuid,
+    split_image_model,
+)
 from utils.log import logger
 from utils.pow import build_legacy_requirements_token, build_proof_token, parse_pow_resources
 from utils.turnstile import solve_turnstile_token
@@ -560,12 +570,20 @@ class OpenAIBackendAPI:
         return payload
 
     def _image_model_slug(self, model: str) -> str:
-        """把标准图片模型名映射到底层 model slug。"""
+        """把标准图片模型名映射到底层 model slug。
+
+        - 上游 slug（gpt-5-5 / gpt-5-5-instant 等）原样透传
+        - gpt-image-2 映射到 DEFAULT_IMAGE_UPSTREAM_MODEL（5.5 极速）
+        - codex-gpt-image-2 保持原样
+        """
+        normalized = str(model or "").strip().lower()
+        if normalized in UPSTREAM_IMAGE_MODELS:
+            return normalized
         _, base_model = split_image_model(model)
         if not base_model:
             return "auto"
         if base_model == "gpt-image-2":
-            return "gpt-5-3"
+            return DEFAULT_IMAGE_UPSTREAM_MODEL
         if base_model == CODEX_IMAGE_MODEL:
             return base_model
         return "auto"
@@ -1158,7 +1176,7 @@ class OpenAIBackendAPI:
 
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None, *,
-                                parent_message_id: str) -> requests.Response:
+                                parent_message_id: str, thinking_effort: str = "") -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
         references = references or []
         parts = [{
@@ -1219,6 +1237,8 @@ class OpenAIBackendAPI:
             "paragen_cot_summary_display_override": "allow",
             "force_parallel_switch": "auto",
         }
+        if thinking_effort:
+            payload["thinking_effort"] = thinking_effort
         path = "/backend-api/f/conversation"
         response = self.session.post(
             self.base_url + path,
@@ -2827,10 +2847,13 @@ class OpenAIBackendAPI:
             images: Optional[list[str]] = None,
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
+            upstream_model: str = "",
     ) -> Iterator[str]:
         system_hints = system_hints or []
         if "picture_v2" in system_hints:
-            yield from self._stream_picture_conversation(prompt, model, images or [])
+            yield from self._stream_picture_conversation(
+                prompt, model, images or [], upstream_model=upstream_model, thinking_effort=thinking_effort,
+            )
             return
 
         normalized = messages or [{"role": "user", "content": prompt}]
@@ -2859,14 +2882,38 @@ class OpenAIBackendAPI:
             except Exception:
                 pass
 
+    @staticmethod
+    def _map_image_thinking(thinking_effort: str, base_model: str) -> tuple[str, str]:
+        """思考强度档位 → (最终 model slug, thinking_effort 值)。
+
+        档位：
+        - none       → 关闭思考（标准模式），模型不变、不注入 thinking
+        - standard   → 标准模式，模型不变、不注入 thinking
+        - high / extended → 深度思考：模型不变 + thinking_effort=extended
+        - xhigh / 极高 / 空（未指定） → 极高思考：thinking_effort=max
+                          （web 端实际值，抓包确认）
+        """
+        normalized = str(thinking_effort or "").strip().lower()
+        if normalized in {"none", "standard"}:
+            return base_model, ""
+        if normalized in {"", "xhigh", "极高"}:
+            # 极高思考（web 端 thinking_effort=max，用户默认档位）
+            return base_model, "max"
+        # high / extended / 其他非空值 → 深度思考
+        return base_model, "extended"
+
     def _stream_picture_conversation(
             self,
             prompt: str,
             model: str,
             images: list[str],
+            upstream_model: str = "",
+            thinking_effort: str = "",
     ) -> Iterator[str]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
+        effective_model = upstream_model or model
+        effective_model, effective_thinking = self._map_image_thinking(thinking_effort, effective_model)
         self._report_progress("uploading")
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
@@ -2874,15 +2921,16 @@ class OpenAIBackendAPI:
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements()
         self._report_progress("preparing_conversation")
-        conduit_token, parent_message_id = self._prepare_image_conversation(prompt, requirements, model)
+        conduit_token, parent_message_id = self._prepare_image_conversation(prompt, requirements, effective_model)
         self._report_progress("starting_generation")
         response = self._start_image_generation(
             prompt,
             requirements,
             conduit_token,
-            model,
+            effective_model,
             references,
             parent_message_id=parent_message_id,
+            thinking_effort=effective_thinking,
         )
         self._report_progress("generating")
         try:

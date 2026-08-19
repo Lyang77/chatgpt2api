@@ -313,6 +313,7 @@ class ConversationRequest:
     prompt: str = ""
     messages: list[dict[str, Any]] | None = None
     thinking_effort: str = ""
+    upstream_model: str = ""
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
@@ -679,6 +680,7 @@ def conversation_events(
     size: str | None = None,
     quality: str = "auto",
     thinking_effort: str = "",
+    upstream_model: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -691,7 +693,8 @@ def conversation_events(
         prompt=final_prompt,
         images=images if image_model else None,
         system_hints=["picture_v2"] if image_model else None,
-        thinking_effort=thinking_effort if not image_model else "",
+        thinking_effort=thinking_effort,
+        upstream_model=upstream_model,
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
@@ -831,6 +834,8 @@ def stream_image_outputs(
             images=request.images or [],
             size=request.size,
             quality=request.quality,
+            thinking_effort=request.thinking_effort,
+            upstream_model=request.upstream_model,
     ):
         last = event
         if event.get("type") == "conversation.delta":

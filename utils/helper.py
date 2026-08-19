@@ -32,6 +32,28 @@ PREFIXED_CODEX_IMAGE_MODELS = {
 }
 IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
 PUBLIC_IMAGE_MODELS = BASE_IMAGE_MODELS | PREFIXED_CODEX_IMAGE_MODELS
+# 上游 /backend-api/f/conversation 生图链路可直接使用的 model slug
+# （来自 chatgpt.com 登录态 /backend-api/models 列表 + web 端实际调用实测）
+UPSTREAM_IMAGE_MODELS = frozenset({
+    "gpt-5-5",
+    "gpt-5-5-instant",   # 5.5 极速
+    "gpt-5-5-mini",
+    "gpt-5-5-pro",
+    "gpt-5-5-thinking",
+    "gpt-5-6",
+    "gpt-5-6-instant",   # 5.6 极速
+    "gpt-5-6-mini",
+    "gpt-5-6-pro",
+    "gpt-5-6-t-mini",
+    "gpt-5-6-thinking",
+    "gpt-5.6-sol",       # 5.6 sol（web 端 gpt-image-2 实际使用的生图模型）
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol-instant",   # 5.6 sol 极速（思考强度：极速）
+    "gpt-5.6-sol-thinking",  # 5.6 sol 深度思考（思考强度：极高）
+})
+# gpt-image-2 默认映射到的上游生图模型（与 web 端抓包一致：gpt-5-6-thinking + thinking_effort=max）
+DEFAULT_IMAGE_UPSTREAM_MODEL = "gpt-5-6-thinking"
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 SUPPORTED_JSON_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
@@ -138,6 +160,19 @@ def is_supported_image_model(model: object) -> bool:
 def is_codex_image_model(model: object) -> bool:
     _, base_model = split_image_model(model)
     return base_model == CODEX_IMAGE_MODEL
+
+
+def is_upstream_image_model(model: object) -> bool:
+    """是否直接使用上游生图 model slug（如 gpt-5-5 / gpt-5-5-instant / gpt-5.6-sol）。"""
+    return str(model or "").strip().lower() in UPSTREAM_IMAGE_MODELS
+
+
+def normalize_image_thinking_effort(value: object) -> str:
+    """生图链路的思考能力归一化：'none' 视为关闭思考，其他非空值 → extended（深度思考）。"""
+    normalized = str(value or "").strip().lower()
+    if normalized in {"", "none"}:
+        return ""
+    return "extended"
 
 
 def is_codex_text_model(model: object) -> bool:
