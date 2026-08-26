@@ -7,12 +7,7 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
-from services.protocol.codex_text import (
-    CodexTextRequest,
-    codex_messages,
-    stream_codex_text_deltas,
-    text_format_from_chat_response_format,
-)
+from services.protocol.codex_text import CodexTextRequest, codex_messages, stream_codex_text_deltas
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -194,7 +189,6 @@ def codex_chat_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], Code
         instructions=instructions,
         input_items=input_items,
         reasoning_effort=thinking_effort_from_body(body) or CODEX_TEXT_DEFAULT_REASONING_EFFORT,
-        text_format=text_format_from_chat_response_format(body.get("response_format")),
     )
 
 

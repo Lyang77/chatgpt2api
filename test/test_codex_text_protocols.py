@@ -122,56 +122,6 @@ class CodexChatCompletionTests(unittest.TestCase):
                 _messages, request = openai_v1_chat_complete.codex_chat_request({**self._body(), **extra})
                 self.assertEqual(request.reasoning_effort, expected)
 
-    def test_codex_chat_maps_json_object_response_format(self) -> None:
-        _messages, request = openai_v1_chat_complete.codex_chat_request({
-            **self._body(),
-            "response_format": {"type": "json_object"},
-        })
-
-        self.assertEqual(request.text_format, {"type": "json_object"})
-
-    def test_codex_chat_maps_json_schema_response_format(self) -> None:
-        _messages, request = openai_v1_chat_complete.codex_chat_request({
-            **self._body(),
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "prompt_review",
-                    "description": "Prompt review result",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {"decision": {"type": "string"}},
-                        "required": ["decision"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-        })
-
-        self.assertEqual(request.text_format, {
-            "type": "json_schema",
-            "name": "prompt_review",
-            "description": "Prompt review result",
-            "strict": True,
-            "schema": {
-                "type": "object",
-                "properties": {"decision": {"type": "string"}},
-                "required": ["decision"],
-                "additionalProperties": False,
-            },
-        })
-
-    def test_codex_chat_rejects_invalid_response_format(self) -> None:
-        with self.assertRaises(HTTPException) as raised:
-            openai_v1_chat_complete.codex_chat_request({
-                **self._body(),
-                "response_format": {"type": "yaml"},
-            })
-
-        self.assertEqual(raised.exception.status_code, 400)
-        self.assertIn("response_format", str(raised.exception.detail))
-
     def test_gpt_5_6_sol_chat_tool_rejection_mentions_requested_model(self) -> None:
         model = "gpt-5.6-sol"
         with (
@@ -418,15 +368,6 @@ class CodexResponsesTests(unittest.TestCase):
                     **extra,
                 })
                 self.assertEqual(request.reasoning_effort, expected)
-
-    def test_codex_responses_preserves_text_format(self) -> None:
-        _messages, request = openai_v1_response.codex_response_request({
-            "model": "gpt-5.5",
-            "input": "hello",
-            "text": {"format": {"type": "json_object"}},
-        })
-
-        self.assertEqual(request.text_format, {"type": "json_object"})
 
     def test_gpt_5_6_sol_responses_tool_rejection_mentions_requested_model(self) -> None:
         model = "gpt-5.6-sol"

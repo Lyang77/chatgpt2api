@@ -909,7 +909,6 @@ class OpenAIBackendAPI:
             input_items: list[dict[str, Any]],
             model: str = CODEX_TEXT_MODEL,
             reasoning_effort: str = CODEX_TEXT_DEFAULT_REASONING_EFFORT,
-            text_format: dict[str, Any] | None = None,
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex text endpoints")
@@ -923,8 +922,6 @@ class OpenAIBackendAPI:
             "input": input_items,
             "stream": True,
         }
-        if text_format is not None:
-            payload["text"] = {"format": dict(text_format)}
         request = urllib.request.Request(
             self.base_url + path,
             json.dumps(payload).encode(),
