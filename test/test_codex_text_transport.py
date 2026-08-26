@@ -145,11 +145,75 @@ class CodexTextTransportTests(unittest.TestCase):
         self.assertEqual(payload["input"], self._request().input_items)
         self.assertFalse(payload["store"])
         self.assertTrue(payload["stream"])
+        self.assertNotIn("text", payload)
         self.assertNotIn("tools", payload)
         self.assertNotIn("tool_choice", payload)
         serialized_log = json.dumps([call.args for call in log_info.call_args_list], default=str)
         self.assertNotIn("secret-token", serialized_log)
         self.assertNotIn("base64,AAAA", serialized_log)
+
+    def test_backend_maps_structured_output_to_responses_text_format(self) -> None:
+        backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        backend.access_token = "secret-token"
+        backend.base_url = "https://chatgpt.com"
+        backend._ensure_codex_source_account = mock.Mock()
+        backend._codex_responses_headers = mock.Mock(return_value={"Authorization": "Bearer secret-token"})
+        backend._iter_codex_text_response_events = mock.Mock(return_value=iter(()))
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        text_format = {
+            "type": "json_schema",
+            "name": "prompt_review",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"decision": {"type": "string"}},
+                "required": ["decision"],
+                "additionalProperties": False,
+            },
+        }
+
+        with mock.patch(
+            "services.openai_backend_api.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            list(
+                backend.iter_codex_text_response_events(
+                    instructions="system rule",
+                    input_items=self._request().input_items,
+                    text_format=text_format,
+                )
+            )
+
+        outgoing = urlopen.call_args.args[0]
+        payload = json.loads(outgoing.data.decode("utf-8"))
+        self.assertEqual(payload["text"], {"format": text_format})
+
+    def test_stream_forwards_text_format_to_backend(self) -> None:
+        backend = mock.Mock()
+        backend.iter_codex_text_response_events.return_value = iter([
+            {"type": "response.output_text.delta", "delta": "{}"},
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ])
+        request = self._request()
+        request.text_format = {"type": "json_object"}
+
+        with (
+            mock.patch.object(codex_text, "OpenAIBackendAPI", return_value=backend),
+            mock.patch.object(codex_text.account_service, "get_text_access_token", return_value="token-a"),
+            mock.patch.object(codex_text.account_service, "get_account", return_value={"email": "a@example.test"}),
+            mock.patch.object(codex_text.account_service, "mark_text_used"),
+        ):
+            self.assertEqual(list(codex_text.stream_codex_text_deltas(request)), ["{}"])
+
+        backend.iter_codex_text_response_events.assert_called_once_with(
+            instructions=request.instructions,
+            input_items=request.input_items,
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            text_format={"type": "json_object"},
+        )
 
     def test_codex_text_sse_yields_first_event_before_eof(self) -> None:
         class IncrementalRaw:

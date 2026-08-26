@@ -22,7 +22,80 @@ class CodexTextRequest:
     instructions: str
     input_items: list[dict[str, Any]]
     reasoning_effort: str = CODEX_TEXT_DEFAULT_REASONING_EFFORT
+    text_format: dict[str, Any] | None = None
     account_email: str = ""
+
+
+def _invalid_text_format(field_name: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={"error": f"{field_name} {message}"},
+    )
+
+
+def _normalize_text_format(value: object, *, field_name: str) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _invalid_text_format(field_name, "must be an object")
+    format_type = str(value.get("type") or "").strip()
+    if format_type in {"text", "json_object"}:
+        return {"type": format_type}
+    if format_type != "json_schema":
+        raise _invalid_text_format(
+            field_name,
+            "type must be text, json_object, or json_schema",
+        )
+
+    name = str(value.get("name") or "").strip()
+    schema = value.get("schema")
+    if not name:
+        raise _invalid_text_format(field_name, "requires a non-empty name")
+    if not isinstance(schema, dict):
+        raise _invalid_text_format(field_name, "requires an object schema")
+    result: dict[str, Any] = {
+        "type": "json_schema",
+        "name": name,
+        "schema": dict(schema),
+    }
+    description = value.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise _invalid_text_format(field_name, "description must be a string")
+        result["description"] = description
+    strict = value.get("strict")
+    if strict is not None:
+        if not isinstance(strict, bool):
+            raise _invalid_text_format(field_name, "strict must be a boolean")
+        result["strict"] = strict
+    return result
+
+
+def text_format_from_chat_response_format(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _invalid_text_format("response_format", "must be an object")
+    if str(value.get("type") or "").strip() != "json_schema":
+        return _normalize_text_format(value, field_name="response_format")
+    json_schema = value.get("json_schema")
+    if not isinstance(json_schema, dict):
+        raise _invalid_text_format(
+            "response_format.json_schema",
+            "must be an object",
+        )
+    return _normalize_text_format(
+        {**json_schema, "type": "json_schema"},
+        field_name="response_format.json_schema",
+    )
+
+
+def text_format_from_responses_text(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise _invalid_text_format("text", "must be an object")
+    return _normalize_text_format(value.get("format"), field_name="text.format")
 
 
 def normalize_codex_image_url(value: object) -> str:
@@ -256,6 +329,7 @@ def stream_codex_text_deltas(request: CodexTextRequest) -> Iterator[str]:
                 input_items=request.input_items,
                 model=request.model or CODEX_TEXT_MODEL,
                 reasoning_effort=request.reasoning_effort,
+                text_format=request.text_format,
             )
             for delta in _codex_text_event_deltas(events):
                 emitted = True
