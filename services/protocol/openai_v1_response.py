@@ -8,7 +8,13 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
-from services.protocol.codex_text import CodexTextRequest, codex_messages, stream_codex_text_deltas
+from services.protocol.codex_text import (
+    CodexTextRequest,
+    codex_messages,
+    codex_tool_config,
+    stream_codex_text_deltas,
+    stream_codex_tool_events,
+)
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -155,7 +161,12 @@ def _append_response_message(messages: list[dict[str, Any]], role: object, conte
         messages.append({"role": str(role or "user"), "content": content})
 
 
-def messages_from_input(input_value: object, instructions: object = None) -> list[dict[str, Any]]:
+def messages_from_input(
+    input_value: object,
+    instructions: object = None,
+    *,
+    preserve_codex_items: bool = False,
+) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     system_text = str(instructions or "").strip()
     if system_text:
@@ -165,6 +176,13 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
             messages.append({"role": "user", "content": input_value.strip()})
         return messages
     if isinstance(input_value, dict):
+        if preserve_codex_items and str(input_value.get("type") or "") in {
+            "function_call",
+            "function_call_output",
+            "reasoning",
+        }:
+            messages.append(dict(input_value))
+            return messages
         if _is_response_content_part(input_value):
             _append_response_message(messages, "user", [dict(input_value)])
             return messages
@@ -187,6 +205,13 @@ def messages_from_input(input_value: object, instructions: object = None) -> lis
                 _append_response_message(messages, "user", pending_parts)
                 pending_parts = []
             if not isinstance(item, dict):
+                continue
+            if preserve_codex_items and str(item.get("type") or "") in {
+                "function_call",
+                "function_call_output",
+                "reasoning",
+            }:
+                messages.append(dict(item))
                 continue
             _append_response_message(
                 messages,
@@ -259,8 +284,15 @@ def image_output_items(prompt: str, data: list[dict[str, Any]], item_id: str | N
     return output
 
 
-def response_created(response_id: str, model: str, created: int) -> dict[str, Any]:
-    return {
+def response_created(
+    response_id: str,
+    model: str,
+    created: int,
+    parallel_tool_calls: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: object | None = None,
+) -> dict[str, Any]:
+    event = {
         "type": "response.created",
         "response": {
             "id": response_id,
@@ -271,9 +303,13 @@ def response_created(response_id: str, model: str, created: int) -> dict[str, An
             "incomplete_details": None,
             "model": model,
             "output": [],
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": parallel_tool_calls,
         },
     }
+    if tools is not None:
+        event["response"]["tools"] = tools
+        event["response"]["tool_choice"] = tool_choice if tool_choice is not None else "auto"
+    return event
 
 
 def response_completed(
@@ -282,6 +318,9 @@ def response_completed(
     created: int,
     output: list[dict[str, Any]],
     usage: dict[str, Any] | None = None,
+    parallel_tool_calls: bool = False,
+    tools: list[dict[str, Any]] | None = None,
+    tool_choice: object | None = None,
 ) -> dict[str, Any]:
     response = {
         "type": "response.completed",
@@ -294,11 +333,14 @@ def response_completed(
             "incomplete_details": None,
             "model": model,
             "output": output,
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": parallel_tool_calls,
         },
     }
     if usage:
         response["response"]["usage"] = usage
+    if tools is not None:
+        response["response"]["tools"] = tools
+        response["response"]["tool_choice"] = tool_choice if tool_choice is not None else "auto"
     return response
 
 
@@ -337,9 +379,12 @@ def stream_text_response(backend, body: dict[str, Any], messages: list[dict[str,
 
 def codex_response_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], CodexTextRequest]:
     model = str(body.get("model") or "")
-    if body.get("tools") or body.get("tool_choice"):
-        raise HTTPException(status_code=400, detail={"error": f"{model} does not support tools"})
-    messages = messages_from_input(body.get("input"), body.get("instructions"))
+    tools, tool_choice, parallel_tool_calls = codex_tool_config(body, model)
+    messages = messages_from_input(
+        body.get("input"),
+        body.get("instructions"),
+        preserve_codex_items=True,
+    )
     instructions, input_items = codex_messages(messages)
     if not input_items:
         raise HTTPException(status_code=400, detail={"error": f"input is required for {model}"})
@@ -348,11 +393,248 @@ def codex_response_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], 
         instructions=instructions,
         input_items=input_items,
         reasoning_effort=thinking_effort_from_body(body) or CODEX_TEXT_DEFAULT_REASONING_EFFORT,
+        tools=tools,
+        tool_choice=tool_choice,
+        parallel_tool_calls=parallel_tool_calls,
     )
+
+
+def _function_call_output_item(
+    item_id: str,
+    call_id: str,
+    name: str,
+    arguments: str,
+    status: str,
+) -> dict[str, Any]:
+    return {
+        "id": item_id,
+        "type": "function_call",
+        "status": status,
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    }
+
+
+def _stream_codex_tool_response_events(
+    messages: list[dict[str, Any]],
+    request: CodexTextRequest,
+) -> Iterator[dict[str, Any]]:
+    response_id = f"resp_{uuid.uuid4().hex}"
+    created = int(time.time())
+    events = stream_codex_tool_events(request)
+    first_event = next(events)
+    parallel_tool_calls = bool(request.parallel_tool_calls)
+    yield _with_account_email(
+        response_created(
+            response_id,
+            request.model,
+            created,
+            parallel_tool_calls,
+            request.tools,
+            request.tool_choice,
+        ),
+        request.account_email,
+    )
+
+    output_items: dict[int, dict[str, Any]] = {}
+    call_output_indexes: dict[int, int] = {}
+    reasoning_output_indexes: dict[int, int] = {}
+    text_output_index: int | None = None
+    text_item_id = ""
+    full_text = ""
+    text_done = False
+    completed = False
+
+    def next_output_index() -> int:
+        return len(output_items)
+
+    for event in itertools.chain([first_event], events):
+        event_type = event.get("type")
+        if event_type == "reasoning_start":
+            reasoning_index = int(event.get("index", 0))
+            output_index = next_output_index()
+            reasoning_output_indexes[reasoning_index] = output_index
+            item = dict(event.get("item") or {})
+            output_items[output_index] = item
+            yield _with_account_email({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": dict(item),
+            }, request.account_email)
+            continue
+
+        if event_type == "reasoning_done":
+            reasoning_index = int(event.get("index", 0))
+            output_index = reasoning_output_indexes.get(reasoning_index)
+            item = dict(event.get("item") or {})
+            if output_index is None:
+                output_index = next_output_index()
+                reasoning_output_indexes[reasoning_index] = output_index
+                yield _with_account_email({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": dict(item),
+                }, request.account_email)
+            output_items[output_index] = item
+            yield _with_account_email({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": dict(item),
+            }, request.account_email)
+            continue
+
+        if event_type == "text_delta":
+            if text_output_index is None:
+                text_output_index = next_output_index()
+                text_item_id = str(event.get("item_id") or f"msg_{uuid.uuid4().hex}")
+                output_items[text_output_index] = text_output_item("", text_item_id, "in_progress")
+                yield _with_account_email({
+                    "type": "response.output_item.added",
+                    "output_index": text_output_index,
+                    "item": output_items[text_output_index],
+                }, request.account_email)
+                yield _with_account_email({
+                    "type": "response.content_part.added",
+                    "item_id": text_item_id,
+                    "output_index": text_output_index,
+                    "content_index": 0,
+                    "part": {"type": "output_text", "text": "", "annotations": []},
+                }, request.account_email)
+            delta = str(event.get("delta") or "")
+            full_text += delta
+            yield _with_account_email({
+                "type": "response.output_text.delta",
+                "item_id": text_item_id,
+                "output_index": text_output_index,
+                "content_index": 0,
+                "delta": delta,
+            }, request.account_email)
+            continue
+
+        if event_type == "tool_call_start":
+            call_index = int(event.get("index", 0))
+            output_index = next_output_index()
+            call_output_indexes[call_index] = output_index
+            item = _function_call_output_item(
+                str(event.get("item_id") or f"fc_{uuid.uuid4().hex}"),
+                str(event.get("call_id") or ""),
+                str(event.get("name") or ""),
+                "",
+                "in_progress",
+            )
+            output_items[output_index] = item
+            yield _with_account_email({
+                "type": "response.output_item.added",
+                "output_index": output_index,
+                "item": dict(item),
+            }, request.account_email)
+            continue
+
+        if event_type == "tool_call_arguments_delta":
+            call_index = int(event.get("index", 0))
+            output_index = call_output_indexes[call_index]
+            item = output_items[output_index]
+            delta = str(event.get("delta") or "")
+            item["arguments"] += delta
+            yield _with_account_email({
+                "type": "response.function_call_arguments.delta",
+                "item_id": item["id"],
+                "output_index": output_index,
+                "delta": delta,
+            }, request.account_email)
+            continue
+
+        if event_type == "tool_call_done":
+            call_index = int(event.get("index", 0))
+            output_index = call_output_indexes[call_index]
+            item = output_items[output_index]
+            item["name"] = str(event.get("name") or item["name"])
+            item["arguments"] = str(event.get("arguments") or item["arguments"])
+            item["status"] = "completed"
+            yield _with_account_email({
+                "type": "response.function_call_arguments.done",
+                "item_id": item["id"],
+                "output_index": output_index,
+                "name": item["name"],
+                "arguments": item["arguments"],
+            }, request.account_email)
+            yield _with_account_email({
+                "type": "response.output_item.done",
+                "output_index": output_index,
+                "item": item,
+            }, request.account_email)
+            continue
+
+        if event_type != "completed":
+            continue
+        completed = True
+        if text_output_index is not None and not text_done:
+            text_done = True
+            yield _with_account_email({
+                "type": "response.output_text.done",
+                "item_id": text_item_id,
+                "output_index": text_output_index,
+                "content_index": 0,
+                "text": full_text,
+            }, request.account_email)
+            yield _with_account_email({
+                "type": "response.content_part.done",
+                "item_id": text_item_id,
+                "output_index": text_output_index,
+                "content_index": 0,
+                "part": {"type": "output_text", "text": full_text, "annotations": []},
+            }, request.account_email)
+            text_item = text_output_item(full_text, text_item_id, "completed")
+            output_items[text_output_index] = text_item
+            yield _with_account_email({
+                "type": "response.output_item.done",
+                "output_index": text_output_index,
+                "item": text_item,
+            }, request.account_email)
+
+    if not completed:
+        raise RuntimeError("Codex tool response ended without completion")
+    ordered_output = [output_items[index] for index in sorted(output_items)]
+    tool_arguments = "".join(
+        str(item.get("arguments") or "")
+        for item in ordered_output
+        if item.get("type") == "function_call"
+    )
+    usage = token_usage(
+        input_text_tokens=count_message_text_tokens(messages, request.model),
+        input_image_tokens=count_message_image_tokens(messages, request.model),
+        output_text_tokens=count_text_tokens(full_text + tool_arguments, request.model),
+    )
+    yield _with_account_email(
+        response_completed(
+            response_id,
+            request.model,
+            created,
+            ordered_output,
+            usage,
+            parallel_tool_calls,
+            request.tools,
+            request.tool_choice,
+        ),
+        request.account_email,
+    )
+
+
+def stream_codex_tool_response(
+    messages: list[dict[str, Any]],
+    request: CodexTextRequest,
+) -> Iterator[dict[str, Any]]:
+    for sequence_number, event in enumerate(_stream_codex_tool_response_events(messages, request)):
+        event["sequence_number"] = sequence_number
+        yield event
 
 
 def stream_codex_text_response(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     messages, request = codex_response_request(body)
+    if request.tools:
+        yield from stream_codex_tool_response(messages, request)
+        return
     response_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())

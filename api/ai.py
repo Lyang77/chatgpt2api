@@ -33,6 +33,7 @@ class ImageGenerationRequest(BaseModel):
     response_format: str = "b64_json"
     history_disabled: bool = True
     stream: bool | None = None
+    conversation_id: str = ""
 
 
 class ChatCompletionRequest(BaseModel):

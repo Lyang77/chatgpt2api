@@ -59,7 +59,7 @@ class AccountModelAllowlistTests(unittest.TestCase):
 
         self.assertEqual(
             CODEX_TEXT_MODELS,
-            ("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"),
+            ("gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra"),
         )
         for model in CODEX_TEXT_MODELS:
             with self.subTest(model=model):
@@ -72,6 +72,9 @@ class AccountModelAllowlistTests(unittest.TestCase):
             "gpt-5.6-sol-pro",
             "GPT-5.6-SOL",
             " gpt-5.6-sol ",
+            "gpt-6",
+            "GPT-6-ASTRA",
+            " gpt-6-astra ",
         ):
             with self.subTest(model=model):
                 self.assertFalse(is_codex_text_model(model))

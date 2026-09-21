@@ -7,7 +7,13 @@ from typing import Any, Iterable, Iterator
 from fastapi import HTTPException
 
 from services.protocol.chat_completion_cache import cache_key, chat_completion_cache, normalize_text_messages
-from services.protocol.codex_text import CodexTextRequest, codex_messages, stream_codex_text_deltas
+from services.protocol.codex_text import (
+    CodexTextRequest,
+    codex_messages,
+    codex_tool_config,
+    stream_codex_text_deltas,
+    stream_codex_tool_events,
+)
 from services.protocol.conversation import (
     ConversationRequest,
     ImageOutput,
@@ -178,8 +184,7 @@ def text_chat_response(
 
 def codex_chat_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], CodexTextRequest]:
     model = str(body.get("model") or "")
-    if body.get("tools") or body.get("tool_choice"):
-        raise HTTPException(status_code=400, detail={"error": f"{model} does not support tools"})
+    tools, tool_choice, parallel_tool_calls = codex_tool_config(body, model)
     messages = chat_messages_from_body(body)
     instructions, input_items = codex_messages(messages)
     if not input_items:
@@ -189,11 +194,73 @@ def codex_chat_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], Code
         instructions=instructions,
         input_items=input_items,
         reasoning_effort=thinking_effort_from_body(body) or CODEX_TEXT_DEFAULT_REASONING_EFFORT,
+        tools=tools,
+        tool_choice=tool_choice,
+        parallel_tool_calls=parallel_tool_calls,
     )
+
+
+def _collect_codex_chat_output(request: CodexTextRequest) -> tuple[str, list[dict[str, Any]]]:
+    content: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    for event in stream_codex_tool_events(request):
+        event_type = event.get("type")
+        index = int(event.get("index", 0))
+        if event_type == "text_delta":
+            content.append(str(event.get("delta") or ""))
+        elif event_type == "tool_call_start":
+            calls[index] = {
+                "id": str(event.get("call_id") or ""),
+                "type": "function",
+                "function": {
+                    "name": str(event.get("name") or ""),
+                    "arguments": "",
+                },
+            }
+        elif event_type == "tool_call_arguments_delta":
+            call = calls.setdefault(index, {
+                "id": str(event.get("call_id") or ""),
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            })
+            call["function"]["arguments"] += str(event.get("delta") or "")
+        elif event_type == "tool_call_done":
+            call = calls.setdefault(index, {
+                "id": str(event.get("call_id") or ""),
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            })
+            call["id"] = str(event.get("call_id") or call["id"])
+            call["function"]["name"] = str(event.get("name") or call["function"]["name"])
+            call["function"]["arguments"] = str(event.get("arguments") or call["function"]["arguments"])
+    return "".join(content), [calls[index] for index in sorted(calls)]
+
+
+def _codex_chat_tool_response(
+    request: CodexTextRequest,
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    content, tool_calls = _collect_codex_chat_output(request)
+    payload = completion_response(request.model, content, messages=messages)
+    choice = payload["choices"][0]
+    if tool_calls:
+        choice["message"]["content"] = content or None
+        choice["message"]["tool_calls"] = tool_calls
+        choice["finish_reason"] = "tool_calls"
+        tool_tokens = count_text_tokens(
+            "".join(str(call["function"].get("arguments") or "") for call in tool_calls),
+            request.model,
+        )
+        payload["usage"]["completion_tokens"] += tool_tokens
+        payload["usage"]["total_tokens"] += tool_tokens
+        payload["usage"]["completion_tokens_details"]["text_tokens"] += tool_tokens
+    return _with_account_email(payload, request.account_email)
 
 
 def codex_chat_completion_response(body: dict[str, Any]) -> dict[str, Any]:
     messages, request = codex_chat_request(body)
+    if request.tools:
+        return _codex_chat_tool_response(request, messages)
     content = "".join(stream_codex_text_deltas(request))
     return _with_account_email(
         completion_response(request.model, content, messages=messages),
@@ -203,6 +270,9 @@ def codex_chat_completion_response(body: dict[str, Any]) -> dict[str, Any]:
 
 def stream_codex_chat_completion(body: dict[str, Any]) -> Iterator[dict[str, Any]]:
     _messages, request = codex_chat_request(body)
+    if request.tools:
+        yield from stream_codex_tool_chat_completion(request)
+        return
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
     sent_role = False
@@ -224,6 +294,61 @@ def stream_codex_chat_completion(body: dict[str, Any]) -> Iterator[dict[str, Any
         )
     yield _with_account_email(
         completion_chunk(request.model, {}, "stop", completion_id, created),
+        request.account_email,
+    )
+
+
+def stream_codex_tool_chat_completion(request: CodexTextRequest) -> Iterator[dict[str, Any]]:
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+    sent_role = False
+    sent_tool_call = False
+    for event in stream_codex_tool_events(request):
+        event_type = event.get("type")
+        if event_type not in {
+            "text_delta",
+            "tool_call_start",
+            "tool_call_arguments_delta",
+        }:
+            continue
+        if not sent_role:
+            sent_role = True
+            yield _with_account_email(
+                completion_chunk(request.model, {"role": "assistant"}, None, completion_id, created),
+                request.account_email,
+            )
+        if event_type == "text_delta":
+            delta = {"content": str(event.get("delta") or "")}
+        elif event_type == "tool_call_start":
+            sent_tool_call = True
+            delta = {"tool_calls": [{
+                "index": int(event.get("index", 0)),
+                "id": str(event.get("call_id") or ""),
+                "type": "function",
+                "function": {
+                    "name": str(event.get("name") or ""),
+                    "arguments": "",
+                },
+            }]}
+        elif event_type == "tool_call_arguments_delta":
+            delta = {"tool_calls": [{
+                "index": int(event.get("index", 0)),
+                "function": {"arguments": str(event.get("delta") or "")},
+            }]}
+        else:
+            continue
+        yield _with_account_email(
+            completion_chunk(request.model, delta, None, completion_id, created),
+            request.account_email,
+        )
+    if not sent_role:
+        yield _with_account_email(
+            completion_chunk(request.model, {"role": "assistant"}, None, completion_id, created),
+            request.account_email,
+        )
+    finish_reason = "tool_calls" if sent_tool_call else "stop"
+    yield _with_account_email(
+        completion_chunk(request.model, {}, finish_reason, completion_id, created),
         request.account_email,
     )
 

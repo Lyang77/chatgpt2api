@@ -14,6 +14,7 @@ BASE_URL = "http://localhost:8000"
 
 
 class ModelListTests(unittest.TestCase):
+    @mock.patch.object(openai_v1_models, "UPSTREAM_IMAGE_MODELS", frozenset())
     def test_list_models_exposes_only_individually_allowed_codex_text_model(self):
         with (
             mock.patch.object(
@@ -38,10 +39,11 @@ class ModelListTests(unittest.TestCase):
         codex_text_ids = {
             model
             for model in ids
-            if model == "gpt-5.5" or model.startswith("gpt-5.6")
+            if model == "gpt-5.5" or model.startswith(("gpt-5.6", "gpt-6"))
         }
         self.assertEqual(codex_text_ids, {"gpt-5.6-terra"})
 
+    @mock.patch.object(openai_v1_models, "UPSTREAM_IMAGE_MODELS", frozenset())
     def test_list_models_exposes_all_codex_text_models_for_unrestricted_account(self):
         with (
             mock.patch.object(
@@ -65,9 +67,9 @@ class ModelListTests(unittest.TestCase):
         codex_text_ids = {
             model
             for model in ids
-            if model == "gpt-5.5" or model.startswith("gpt-5.6")
+            if model == "gpt-5.5" or model.startswith(("gpt-5.6", "gpt-6"))
         }
-        expected = {"gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol"}
+        expected = {"gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra"}
         self.assertEqual(codex_text_ids, expected)
 
     def test_list_models_exposes_codex_text_model_for_eligible_codex_account(self):

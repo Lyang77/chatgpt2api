@@ -22,7 +22,12 @@ from services.log_service import (
     image_task_registry,
     log_service,
 )
-from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import (
+    ConversationBusyError,
+    ImageContentPolicyError,
+    ImagePollTimeoutError,
+    OpenAIBackendAPI,
+)
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
@@ -314,6 +319,7 @@ class ConversationRequest:
     messages: list[dict[str, Any]] | None = None
     thinking_effort: str = ""
     upstream_model: str = ""
+    conversation_id: str = ""
     images: list[str] | None = None
     n: int = 1
     size: str | None = None
@@ -370,6 +376,7 @@ class ImageOutput:
         if self.account_email:
             chunk["_account_email"] = self.account_email
         if self.conversation_id:
+            chunk["conversation_id"] = self.conversation_id
             chunk["_conversation_id"] = self.conversation_id
         if self.kind == "message":
             chunk.update({
@@ -681,6 +688,7 @@ def conversation_events(
     quality: str = "auto",
     thinking_effort: str = "",
     upstream_model: str = "",
+    conversation_id: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -695,6 +703,7 @@ def conversation_events(
         system_hints=["picture_v2"] if image_model else None,
         thinking_effort=thinking_effort,
         upstream_model=upstream_model,
+        conversation_id=conversation_id,
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
@@ -802,7 +811,9 @@ def _get_detailed_error_from_tasks(
         return ""
 
 
-def _remove_image_conversation_later(backend: OpenAIBackendAPI, conversation_id: str) -> None:
+def _remove_image_conversation_later(backend: OpenAIBackendAPI, conversation_id: str, keep: bool = False) -> None:
+    if keep:
+        return
     if not config.image_remove_conversation_after_result or not conversation_id:
         return
 
@@ -827,37 +838,48 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     last: dict[str, Any] = {}
-    for event in conversation_events(
-            backend,
-            prompt=request.prompt,
-            model=request.model,
-            images=request.images or [],
-            size=request.size,
-            quality=request.quality,
-            thinking_effort=request.thinking_effort,
-            upstream_model=request.upstream_model,
-    ):
-        last = event
-        if event.get("type") == "conversation.delta":
-            yield ImageOutput(
-                kind="progress",
+    try:
+        for event in conversation_events(
+                backend,
+                prompt=request.prompt,
                 model=request.model,
-                index=index,
-                total=total,
-                text=str(event.get("delta") or ""),
-                upstream_event_type="conversation.delta",
-            )
-            continue
-        if event.get("type") == "conversation.event":
-            raw = event.get("raw")
-            raw_type = str(raw.get("type") or "") if isinstance(raw, dict) else ""
-            yield ImageOutput(
-                kind="progress",
-                model=request.model,
-                index=index,
-                total=total,
-                upstream_event_type=raw_type,
-            )
+                images=request.images or [],
+                size=request.size,
+                quality=request.quality,
+                thinking_effort=request.thinking_effort,
+                upstream_model=request.upstream_model,
+                conversation_id=request.conversation_id,
+        ):
+            last = event
+            if event.get("type") == "conversation.delta":
+                yield ImageOutput(
+                    kind="progress",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    text=str(event.get("delta") or ""),
+                    upstream_event_type="conversation.delta",
+                )
+                continue
+            if event.get("type") == "conversation.event":
+                raw = event.get("raw")
+                raw_type = str(raw.get("type") or "") if isinstance(raw, dict) else ""
+                yield ImageOutput(
+                    kind="progress",
+                    model=request.model,
+                    index=index,
+                    total=total,
+                    upstream_event_type=raw_type,
+                )
+    except ConversationBusyError as exc:
+        # 同一会话仍有图片任务在途：返回 409 让调用方稍后重试，不换账号
+        raise ImageGenerationError(
+            str(exc) or "conversation is busy",
+            status_code=409,
+            error_type="invalid_request_error",
+            code="conversation_busy",
+            conversation_id=exc.conversation_id,
+        ) from exc
 
     conversation_id = str(last.get("conversation_id") or "")
     file_ids = [str(item) for item in last.get("file_ids") or []]
@@ -1019,7 +1041,7 @@ def stream_image_outputs(
     if image_urls or reported_data:
         _consume_image_urls(image_urls)
         if reported_data:
-            _remove_image_conversation_later(backend, conversation_id)
+            _remove_image_conversation_later(backend, conversation_id, keep=bool(request.conversation_id))
             yield ImageOutput(
                 kind="result",
                 model=request.model,
@@ -1124,7 +1146,7 @@ def stream_image_outputs(
                         int(time.time()),
                     )["data"]
                     if data:
-                        _remove_image_conversation_later(backend, conversation_id)
+                        _remove_image_conversation_later(backend, conversation_id, keep=bool(request.conversation_id))
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
                         return
         elif is_text_reply:
@@ -1236,7 +1258,7 @@ def stream_image_outputs(
                     int(time.time()),
                 )["data"]
                 if data:
-                    _remove_image_conversation_later(backend, conversation_id)
+                    _remove_image_conversation_later(backend, conversation_id, keep=bool(request.conversation_id))
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
                     return
         
@@ -1783,11 +1805,14 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
     message = ""
     progress_parts: list[str] = []
     account_email = ""
+    conversation_id = ""
     completion_reason = ""
     for output in outputs:
         created = created or output.created
         if output.account_email and not account_email:
             account_email = output.account_email
+        if output.conversation_id and not conversation_id:
+            conversation_id = output.conversation_id
         if output.completion_reason:
             completion_reason = output.completion_reason
         if output.kind == "progress" and output.text:
@@ -1802,6 +1827,10 @@ def collect_image_outputs(outputs: Iterable[ImageOutput]) -> dict[str, Any]:
         text = message or "".join(progress_parts).strip()
         if text:
             result["message"] = text
+    if conversation_id:
+        # 公开字段供调用方回传（log_service 只剥离下划线内部字段，如 _conversation_id）
+        result["conversation_id"] = conversation_id
+        result["_conversation_id"] = conversation_id
     if account_email:
         result["_account_email"] = account_email
     if completion_reason:

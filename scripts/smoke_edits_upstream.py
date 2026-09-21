@@ -71,6 +71,7 @@ def main() -> None:
         captured["model"] = request.model
         captured["upstream_model"] = request.upstream_model
         captured["thinking_effort"] = request.thinking_effort
+        captured["conversation_id"] = request.conversation_id
         captured["images"] = bool(request.images)
         return iter(())
 
@@ -83,11 +84,13 @@ def main() -> None:
             "prompt": "test",
             "images": [(PNG_BYTES, "a.png", "image/png")],
             "thinking_effort": "high",
+            "conversation_id": "conv-abc-123",
         })
         list(result)  # 消费生成器
         check("handler: conv_model 归一化为 gpt-image-2", captured["model"], "gpt-image-2")
         check("handler: upstream_model 透传", captured["upstream_model"], "gpt-5-5-instant")
         check("handler: thinking 原样透传(链路层归一化)", captured["thinking_effort"], "high")
+        check("handler: conversation_id 透传", captured["conversation_id"], "conv-abc-123")
         check("handler: images 传递", captured["images"], True)
 
         # 4b) model=gpt-image-2 默认（无思考）

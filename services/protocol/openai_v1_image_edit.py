@@ -83,6 +83,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     thinking_effort = str(
         (body.get("thinking_effort") if "thinking_effort" in body else body.get("reasoning_effort")) or ""
     ).strip().lower()
+    conversation_id = str(body.get("conversation_id") or "").strip()
     n = int(body.get("n") or 1)
     size = body.get("size")
     quality = str(body.get("quality") or "auto")
@@ -102,6 +103,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         model=conv_model,
         upstream_model=upstream_model,
         thinking_effort=thinking_effort,
+        conversation_id=conversation_id,
         n=n,
         size=size,
         quality=quality,

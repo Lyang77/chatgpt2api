@@ -303,6 +303,7 @@ def token_usage(
             "text_tokens": max(0, int(input_text_tokens or 0)),
             "image_tokens": max(0, int(input_image_tokens or 0)),
             "cached_tokens": 0,
+            "cache_write_tokens": 0,
         },
         "output_tokens_details": {
             "text_tokens": max(0, int(output_text_tokens or 0)),

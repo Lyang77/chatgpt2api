@@ -47,6 +47,14 @@ class ImagePollTimeoutError(RuntimeError):
     pass
 
 
+class ConversationBusyError(RuntimeError):
+    """同一上游会话仍有图片任务在生成中，不能并发续发生图。"""
+
+    def __init__(self, conversation_id: str, message: str = ""):
+        super().__init__(message or "conversation is busy with an in-flight image task")
+        self.conversation_id = conversation_id
+
+
 class ImageContentPolicyError(RuntimeError):
     """Raised when image generation is blocked by content policy moderation."""
     pass
@@ -909,6 +917,9 @@ class OpenAIBackendAPI:
             input_items: list[dict[str, Any]],
             model: str = CODEX_TEXT_MODEL,
             reasoning_effort: str = CODEX_TEXT_DEFAULT_REASONING_EFFORT,
+            tools: list[dict[str, Any]] | None = None,
+            tool_choice: object | None = None,
+            parallel_tool_calls: bool | None = None,
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex text endpoints")
@@ -922,6 +933,12 @@ class OpenAIBackendAPI:
             "input": input_items,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = tool_choice if tool_choice is not None else "auto"
+            payload["include"] = ["reasoning.encrypted_content"]
+        if parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = parallel_tool_calls
         request = urllib.request.Request(
             self.base_url + path,
             json.dumps(payload).encode(),
@@ -1068,14 +1085,19 @@ class OpenAIBackendAPI:
             prompt: str,
             requirements: ChatRequirements,
             model: str,
+            conversation_id: str = "",
+            parent_message_id: str = "",
     ) -> tuple[str, str]:
-        """为图片生成准备 conduit token 及其绑定的父消息 ID。"""
+        """为图片生成准备 conduit token 及其绑定的父消息 ID。
+
+        - conversation_id 非空时在同一上游会话内续发（prepare 携带会话 ID）
+        - parent_message_id 非空时作为消息锚点；否则新生成一个
+        """
         path = "/backend-api/f/conversation/prepare"
-        parent_message_id = new_uuid()
+        resolved_parent = parent_message_id or new_uuid()
         payload = {
             "action": "next",
-            "fork_from_shared_post": False,
-            "parent_message_id": parent_message_id,
+            "parent_message_id": resolved_parent,
             "model": self._image_model_slug(model),
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
@@ -1091,6 +1113,8 @@ class OpenAIBackendAPI:
             "supported_encodings": ["v1"],
             "client_contextual_info": {"app_name": "chatgpt.com"},
         }
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
         response = self.session.post(
             self.base_url + path,
             headers=self._image_headers(path, requirements),
@@ -1098,7 +1122,7 @@ class OpenAIBackendAPI:
             timeout=60,
         )
         ensure_ok(response, path)
-        return response.json().get("conduit_token", ""), parent_message_id
+        return response.json().get("conduit_token", ""), resolved_parent
 
     def _decode_image_base64(self, image: str) -> bytes:
         """把 base64 图片字符串或本地路径解码成二进制。"""
@@ -1176,7 +1200,8 @@ class OpenAIBackendAPI:
 
     def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
                                 references: Optional[list[Dict[str, Any]]] = None, *,
-                                parent_message_id: str, thinking_effort: str = "") -> requests.Response:
+                                parent_message_id: str, thinking_effort: str = "",
+                                conversation_id: str = "") -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
         references = references or []
         parts = [{
@@ -1239,6 +1264,8 @@ class OpenAIBackendAPI:
         }
         if thinking_effort:
             payload["thinking_effort"] = thinking_effort
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
         path = "/backend-api/f/conversation"
         response = self.session.post(
             self.base_url + path,
@@ -2848,11 +2875,13 @@ class OpenAIBackendAPI:
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
             upstream_model: str = "",
+            conversation_id: str = "",
     ) -> Iterator[str]:
         system_hints = system_hints or []
         if "picture_v2" in system_hints:
             yield from self._stream_picture_conversation(
-                prompt, model, images or [], upstream_model=upstream_model, thinking_effort=thinking_effort,
+                prompt, model, images or [], upstream_model=upstream_model,
+                thinking_effort=thinking_effort, conversation_id=conversation_id,
             )
             return
 
@@ -2901,6 +2930,37 @@ class OpenAIBackendAPI:
         # 空（未指定，默认高思考）/ high / extended / 其他非空值 → 高思考
         return base_model, "extended"
 
+    def _prepare_conversation_continuation(self, conversation_id: str) -> str:
+        """校验上游会话可续发并返回续发锚点（最后一条 assistant 消息 id）。
+
+        若会话仍有图片任务在途（未完成也未失败）抛 ConversationBusyError，
+        避免并发续发同一会话触发上游 403。
+        """
+        conversation = self._get_conversation(conversation_id)
+        records = self._extract_image_tool_records(conversation)
+        if records:
+            terminal = self._image_generation_terminal_state(conversation)
+            if terminal == "":
+                raise ConversationBusyError(
+                    conversation_id,
+                    "conversation still has an in-flight image task; retry after it completes",
+                )
+        # 续发锚点：mapping 中 create_time 最大的 assistant 消息 id
+        anchor = ""
+        anchor_ts = -1.0
+        for mid, node in (conversation.get("mapping") or {}).items():
+            message = (node or {}).get("message") or {}
+            role = str(((message.get("author") or {}).get("role")) or "").strip().lower()
+            if role != "assistant":
+                continue
+            ts = float(message.get("create_time") or 0.0)
+            if ts > anchor_ts:
+                anchor_ts = ts
+                anchor = str(mid or "")
+        if not anchor:
+            raise ConversationBusyError(conversation_id, "conversation has no assistant message to continue from")
+        return anchor
+
     def _stream_picture_conversation(
             self,
             prompt: str,
@@ -2908,11 +2968,16 @@ class OpenAIBackendAPI:
             images: list[str],
             upstream_model: str = "",
             thinking_effort: str = "",
+            conversation_id: str = "",
     ) -> Iterator[str]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
         effective_model = upstream_model or model
         effective_model, effective_thinking = self._map_image_thinking(thinking_effort, effective_model)
+        continuation_parent = ""
+        if conversation_id:
+            self._report_progress("checking_conversation")
+            continuation_parent = self._prepare_conversation_continuation(conversation_id)
         self._report_progress("uploading")
         references = [self._upload_image(image, f"image_{idx}.png") for idx, image in enumerate(images, start=1)]
         self._report_progress("bootstrapping")
@@ -2920,7 +2985,11 @@ class OpenAIBackendAPI:
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements()
         self._report_progress("preparing_conversation")
-        conduit_token, parent_message_id = self._prepare_image_conversation(prompt, requirements, effective_model)
+        conduit_token, parent_message_id = self._prepare_image_conversation(
+            prompt, requirements, effective_model,
+            conversation_id=conversation_id,
+            parent_message_id=continuation_parent or "",
+        )
         self._report_progress("starting_generation")
         response = self._start_image_generation(
             prompt,
@@ -2930,6 +2999,7 @@ class OpenAIBackendAPI:
             references,
             parent_message_id=parent_message_id,
             thinking_effort=effective_thinking,
+            conversation_id=conversation_id,
         )
         self._report_progress("generating")
         try:

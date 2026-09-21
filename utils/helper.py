@@ -24,6 +24,7 @@ CODEX_TEXT_MODELS = (
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-5.6-sol",
+    "gpt-6-astra",
 )
 CODEX_TEXT_MODEL_SET = frozenset(CODEX_TEXT_MODELS)
 PREFIXED_CODEX_IMAGE_MODELS = {

@@ -14,7 +14,7 @@ from utils.helper import is_codex_text_model
 
 
 class CodexChatCompletionTests(unittest.TestCase):
-    GPT_5_6_MODELS = ("gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol")
+    CODEX_ADDITIONAL_MODELS = ("gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.6-sol", "gpt-6-astra")
 
     def setUp(self) -> None:
         self.old_cache_settings = config.data.get("chat_completion_cache")
@@ -80,8 +80,8 @@ class CodexChatCompletionTests(unittest.TestCase):
         self.assertEqual(response["_account_email"], "codex@example.test")
         stream_codex.assert_called_once()
 
-    def test_gpt_5_6_models_use_codex_chat_adapter_and_preserve_model(self) -> None:
-        for model in self.GPT_5_6_MODELS:
+    def test_additional_models_use_codex_chat_adapter_and_preserve_model(self) -> None:
+        for model in self.CODEX_ADDITIONAL_MODELS:
             with self.subTest(model=model):
                 def fake_codex_deltas(request):
                     self.assertEqual(request.model, model)
@@ -122,27 +122,108 @@ class CodexChatCompletionTests(unittest.TestCase):
                 _messages, request = openai_v1_chat_complete.codex_chat_request({**self._body(), **extra})
                 self.assertEqual(request.reasoning_effort, expected)
 
-    def test_gpt_5_6_sol_chat_tool_rejection_mentions_requested_model(self) -> None:
+    def test_gpt_5_6_sol_chat_returns_function_tool_call(self) -> None:
         model = "gpt-5.6-sol"
-        with (
-            mock.patch.object(
-                openai_v1_chat_complete,
-                "stream_codex_text_deltas",
-                side_effect=AssertionError("tool rejection must happen before Codex transport"),
-            ),
-            mock.patch.object(openai_v1_chat_complete, "text_backend", return_value=object()),
-            mock.patch.object(openai_v1_chat_complete, "collect_text", return_value="unexpected Web response"),
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                openai_v1_chat_complete.handle({
-                    "model": model,
-                    "messages": [{"role": "user", "content": "use a tool"}],
-                    "tools": [{"type": "function", "name": "run"}],
-                })
+        parameters = {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        }
 
-        self.assertEqual(raised.exception.status_code, 400)
-        self.assertIn(model, str(raised.exception.detail))
-        self.assertNotIn("gpt-5.5", str(raised.exception.detail))
+        def fake_tool_events(request):
+            self.assertEqual(request.model, model)
+            self.assertEqual(request.tools, [{
+                "type": "function",
+                "name": "query_image_task",
+                "description": "Query an image task",
+                "parameters": parameters,
+            }])
+            self.assertEqual(
+                request.tool_choice,
+                {"type": "function", "name": "query_image_task"},
+            )
+            self.assertFalse(request.parallel_tool_calls)
+            request.account_email = "codex@example.test"
+            yield {
+                "type": "tool_call_start",
+                "index": 0,
+                "call_id": "call_42",
+                "name": "query_image_task",
+            }
+            yield {
+                "type": "tool_call_arguments_delta",
+                "index": 0,
+                "call_id": "call_42",
+                "delta": '{"task_id":"42"}',
+            }
+            yield {
+                "type": "tool_call_done",
+                "index": 0,
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            }
+            yield {"type": "completed"}
+
+        with mock.patch.object(
+            openai_v1_chat_complete,
+            "stream_codex_tool_events",
+            side_effect=fake_tool_events,
+        ) as stream_codex:
+            response = openai_v1_chat_complete.handle({
+                "model": model,
+                "messages": [{"role": "user", "content": "query task 42"}],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "query_image_task",
+                        "description": "Query an image task",
+                        "parameters": parameters,
+                    },
+                }],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "query_image_task"},
+                },
+                "parallel_tool_calls": False,
+            })
+
+        stream_codex.assert_called_once()
+        choice = response["choices"][0]
+        self.assertEqual(response["model"], model)
+        self.assertEqual(response["_account_email"], "codex@example.test")
+        self.assertEqual(choice["finish_reason"], "tool_calls")
+        self.assertIsNone(choice["message"]["content"])
+        self.assertEqual(choice["message"]["tool_calls"], [{
+            "id": "call_42",
+            "type": "function",
+            "function": {
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            },
+        }])
+
+    def test_codex_chat_with_optional_tools_can_return_final_text(self) -> None:
+        def fake_tool_events(request):
+            request.account_email = "codex@example.test"
+            yield {"type": "text_delta", "delta": "final answer"}
+            yield {"type": "completed"}
+
+        with mock.patch.object(
+            openai_v1_chat_complete,
+            "stream_codex_tool_events",
+            side_effect=fake_tool_events,
+        ):
+            response = openai_v1_chat_complete.handle({
+                "model": "gpt-5.6-sol",
+                "messages": [{"role": "user", "content": "answer directly if no tool is needed"}],
+                "tools": [{"type": "function", "function": {"name": "query_image_task"}}],
+            })
+
+        choice = response["choices"][0]
+        self.assertEqual(choice["message"]["content"], "final answer")
+        self.assertEqual(choice["finish_reason"], "stop")
+        self.assertNotIn("tool_calls", choice["message"])
 
     def test_stream_codex_completion_emits_role_deltas_and_stop(self) -> None:
         with (
@@ -168,22 +249,102 @@ class CodexChatCompletionTests(unittest.TestCase):
         self.assertTrue(all(chunk["_account_email"] == "codex@example.test" for chunk in chunks))
         stream_codex.assert_called_once()
 
-    def test_codex_completion_rejects_nonempty_tools_and_tool_choice(self) -> None:
+    def test_stream_codex_chat_emits_openai_tool_call_chunks(self) -> None:
+        def fake_tool_events(request):
+            request.account_email = "codex@example.test"
+            yield {
+                "type": "reasoning_start",
+                "index": 0,
+                "item": {
+                    "id": "rs_42",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "encrypted-state",
+                },
+            }
+            yield {
+                "type": "reasoning_done",
+                "index": 0,
+                "item": {
+                    "id": "rs_42",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "encrypted-state",
+                },
+            }
+            yield {
+                "type": "tool_call_start",
+                "index": 0,
+                "call_id": "call_42",
+                "name": "query_image_task",
+            }
+            yield {
+                "type": "tool_call_arguments_delta",
+                "index": 0,
+                "call_id": "call_42",
+                "delta": '{"task_id":',
+            }
+            yield {
+                "type": "tool_call_arguments_delta",
+                "index": 0,
+                "call_id": "call_42",
+                "delta": '"42"}',
+            }
+            yield {
+                "type": "tool_call_done",
+                "index": 0,
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            }
+            yield {"type": "completed"}
+
+        with mock.patch.object(
+            openai_v1_chat_complete,
+            "stream_codex_tool_events",
+            side_effect=fake_tool_events,
+        ):
+            chunks = list(openai_v1_chat_complete.handle({
+                "model": "gpt-5.6-sol",
+                "stream": True,
+                "messages": [{"role": "user", "content": "query task 42"}],
+                "tools": [{"type": "function", "function": {"name": "query_image_task"}}],
+            }))
+
+        self.assertEqual(chunks[0]["choices"][0]["delta"], {"role": "assistant"})
+        self.assertEqual(chunks[1]["choices"][0]["delta"], {"tool_calls": [{
+            "index": 0,
+            "id": "call_42",
+            "type": "function",
+            "function": {"name": "query_image_task", "arguments": ""},
+        }]})
+        self.assertEqual(
+            "".join(
+                chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                for chunk in chunks[2:4]
+            ),
+            '{"task_id":"42"}',
+        )
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "tool_calls")
+        self.assertTrue(all(chunk["model"] == "gpt-5.6-sol" for chunk in chunks))
+        self.assertTrue(all(chunk["_account_email"] == "codex@example.test" for chunk in chunks))
+
+    def test_codex_completion_rejects_unsupported_tools_and_choice_without_tools(self) -> None:
         unsupported = (
-            {"tools": [{"type": "function", "function": {"name": "run"}}]},
+            {"tools": [{"type": "web_search"}]},
             {"tool_choice": "auto"},
         )
         for extra in unsupported:
             with self.subTest(extra=extra), mock.patch.object(
-                openai_v1_chat_complete, "normalize_messages", side_effect=lambda value: value
-            ), mock.patch.object(openai_v1_chat_complete, "text_backend", return_value=object()), mock.patch.object(
-                openai_v1_chat_complete, "collect_text", return_value="unexpected"
+                openai_v1_chat_complete,
+                "stream_codex_tool_events",
+                side_effect=AssertionError("invalid tool requests must fail before transport"),
             ):
                 with self.assertRaises(HTTPException) as raised:
                     openai_v1_chat_complete.handle({**self._body(), **extra})
 
                 self.assertEqual(raised.exception.status_code, 400)
-                self.assertIn("does not support tools", str(raised.exception.detail))
+                self.assertIn("tool", str(raised.exception.detail))
 
     def test_codex_completion_rejects_messages_without_user_or_assistant_content(self) -> None:
         invalid_messages = (
@@ -275,7 +436,7 @@ class CodexChatCompletionTests(unittest.TestCase):
 
 
 class CodexResponsesTests(unittest.TestCase):
-    GPT_5_6_MODELS = CodexChatCompletionTests.GPT_5_6_MODELS
+    CODEX_ADDITIONAL_MODELS = CodexChatCompletionTests.CODEX_ADDITIONAL_MODELS
 
     def setUp(self) -> None:
         self.old_cache_settings = config.data.get("chat_completion_cache")
@@ -326,8 +487,8 @@ class CodexResponsesTests(unittest.TestCase):
         self.assertEqual(response["_account_email"], "codex@example.test")
         stream_codex.assert_called_once()
 
-    def test_gpt_5_6_models_use_codex_responses_adapter_and_preserve_model(self) -> None:
-        for model in self.GPT_5_6_MODELS:
+    def test_additional_models_use_codex_responses_adapter_and_preserve_model(self) -> None:
+        for model in self.CODEX_ADDITIONAL_MODELS:
             with self.subTest(model=model):
                 def fake_codex_deltas(request):
                     self.assertEqual(request.model, model)
@@ -369,27 +530,208 @@ class CodexResponsesTests(unittest.TestCase):
                 })
                 self.assertEqual(request.reasoning_effort, expected)
 
-    def test_gpt_5_6_sol_responses_tool_rejection_mentions_requested_model(self) -> None:
-        model = "gpt-5.6-sol"
-        with (
-            mock.patch.object(
-                openai_v1_response,
-                "stream_codex_text_deltas",
-                side_effect=AssertionError("tool rejection must happen before Codex transport"),
-            ),
-            mock.patch.object(openai_v1_response, "text_backend", return_value=object()),
-            mock.patch.object(openai_v1_response, "stream_text_deltas", return_value=iter(["unexpected Web response"])),
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                openai_v1_response.handle({
-                    "model": model,
-                    "input": "use a tool",
-                    "tools": [{"type": "function", "name": "run"}],
-                })
+    def test_codex_responses_preserves_function_result_for_the_next_model_turn(self) -> None:
+        _messages, request = openai_v1_response.codex_response_request({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "id": "rs_42",
+                    "type": "reasoning",
+                    "encrypted_content": "encrypted-state",
+                },
+                {
+                    "id": "fc_42",
+                    "type": "function_call",
+                    "call_id": "call_42",
+                    "name": "query_image_task",
+                    "arguments": '{"task_id":"42"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_42",
+                    "output": '{"status":"completed"}',
+                },
+            ],
+            "tools": [{"type": "function", "name": "query_image_task"}],
+        })
 
-        self.assertEqual(raised.exception.status_code, 400)
-        self.assertIn(model, str(raised.exception.detail))
-        self.assertNotIn("gpt-5.5", str(raised.exception.detail))
+        self.assertEqual(request.input_items, [
+            {
+                "type": "reasoning",
+                "id": "rs_42",
+                "encrypted_content": "encrypted-state",
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+                "id": "fc_42",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_42",
+                "output": '{"status":"completed"}',
+            },
+        ])
+
+    def test_gpt_5_6_sol_responses_returns_function_call_item(self) -> None:
+        model = "gpt-5.6-sol"
+        parameters = {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        }
+
+        def fake_tool_events(request):
+            self.assertEqual(request.model, model)
+            self.assertEqual(request.tools, [{
+                "type": "function",
+                "name": "query_image_task",
+                "parameters": parameters,
+            }])
+            request.account_email = "codex@example.test"
+            yield {
+                "type": "reasoning_start",
+                "index": 0,
+                "item": {
+                    "id": "rs_42",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "encrypted-state",
+                },
+            }
+            yield {
+                "type": "reasoning_done",
+                "index": 0,
+                "item": {
+                    "id": "rs_42",
+                    "type": "reasoning",
+                    "summary": [],
+                    "encrypted_content": "encrypted-state",
+                },
+            }
+            yield {
+                "type": "tool_call_start",
+                "index": 0,
+                "item_id": "fc_42",
+                "call_id": "call_42",
+                "name": "query_image_task",
+            }
+            yield {
+                "type": "tool_call_arguments_delta",
+                "index": 0,
+                "item_id": "fc_42",
+                "call_id": "call_42",
+                "delta": '{"task_id":"42"}',
+            }
+            yield {
+                "type": "tool_call_done",
+                "index": 0,
+                "item_id": "fc_42",
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            }
+            yield {"type": "completed"}
+
+        with mock.patch.object(
+            openai_v1_response,
+            "stream_codex_tool_events",
+            side_effect=fake_tool_events,
+        ) as stream_codex:
+            response = openai_v1_response.handle({
+                "model": model,
+                "input": "query task 42",
+                "tools": [{
+                    "type": "function",
+                    "name": "query_image_task",
+                    "parameters": parameters,
+                }],
+            })
+
+        stream_codex.assert_called_once()
+        self.assertEqual(response["model"], model)
+        self.assertEqual(response["_account_email"], "codex@example.test")
+        self.assertEqual(response["tool_choice"], "auto")
+        self.assertEqual(response["tools"][0]["name"], "query_image_task")
+        self.assertEqual(
+            response["usage"]["input_tokens_details"]["cache_write_tokens"],
+            0,
+        )
+        self.assertEqual(response["output"], [
+            {
+                "id": "rs_42",
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "encrypted-state",
+            },
+            {
+                "id": "fc_42",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            },
+        ])
+
+    def test_stream_codex_responses_emits_function_call_events_in_order(self) -> None:
+        def fake_tool_events(request):
+            request.account_email = "codex@example.test"
+            yield {
+                "type": "tool_call_start",
+                "index": 0,
+                "item_id": "fc_42",
+                "call_id": "call_42",
+                "name": "query_image_task",
+            }
+            yield {
+                "type": "tool_call_arguments_delta",
+                "index": 0,
+                "item_id": "fc_42",
+                "call_id": "call_42",
+                "delta": '{"task_id":"42"}',
+            }
+            yield {
+                "type": "tool_call_done",
+                "index": 0,
+                "item_id": "fc_42",
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            }
+            yield {"type": "completed"}
+
+        with mock.patch.object(
+            openai_v1_response,
+            "stream_codex_tool_events",
+            side_effect=fake_tool_events,
+        ):
+            events = list(openai_v1_response.handle({
+                "model": "gpt-5.6-sol",
+                "stream": True,
+                "input": "query task 42",
+                "tools": [{"type": "function", "name": "query_image_task"}],
+            }))
+
+        self.assertEqual([event["type"] for event in events], [
+            "response.created",
+            "response.output_item.added",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_item.done",
+            "response.completed",
+        ])
+        self.assertEqual(events[1]["item"]["type"], "function_call")
+        self.assertEqual(events[2]["delta"], '{"task_id":"42"}')
+        self.assertEqual(events[3]["arguments"], '{"task_id":"42"}')
+        self.assertEqual(events[-1]["response"]["output"][0]["call_id"], "call_42")
+        self.assertEqual(
+            [event["sequence_number"] for event in events],
+            list(range(len(events))),
+        )
+        self.assertTrue(all(event["_account_email"] == "codex@example.test" for event in events))
 
     def test_stream_codex_response_preserves_message_order_multi_images_and_event_order(self) -> None:
         def fake_codex_deltas(request):
@@ -488,18 +830,16 @@ class CodexResponsesTests(unittest.TestCase):
                 with self.assertRaises(type(failure)):
                     next(events)
 
-    def test_codex_response_rejects_nonempty_tools_and_tool_choice(self) -> None:
+    def test_codex_response_rejects_unsupported_tools_and_choice_without_tools(self) -> None:
         for extra in (
             {"tools": [{"type": "web_search"}]},
             {"tools": [{"type": "image_generation"}]},
-            {"tools": [{"type": "function", "name": "run"}]},
             {"tool_choice": "auto"},
         ):
             with self.subTest(extra=extra), mock.patch.object(
                 openai_v1_response,
-                "stream_codex_text_deltas",
-                side_effect=AssertionError("tool requests must fail before transport"),
-                create=True,
+                "stream_codex_tool_events",
+                side_effect=AssertionError("invalid tool requests must fail before transport"),
             ), mock.patch.object(
                 openai_v1_response,
                 "stream_image_outputs_with_pool",
@@ -517,7 +857,7 @@ class CodexResponsesTests(unittest.TestCase):
                     })
 
                 self.assertEqual(raised.exception.status_code, 400)
-                self.assertIn("does not support tools", str(raised.exception.detail))
+                self.assertIn("tool", str(raised.exception.detail))
 
     def test_codex_response_rejects_empty_input(self) -> None:
         for input_value in ("", [], [{"role": "system", "content": "instructions only"}]):

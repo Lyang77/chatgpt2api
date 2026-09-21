@@ -185,6 +185,8 @@ curl http://localhost:8000/v1/models \
 | 返回模型 | `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` |
 | 接入场景 | 可接入 Cherry Studio、New API 等上游或客户端                                                                          |
 
+Codex 文本接口支持 `gpt-5.5`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-6-astra`，可用于 `/v1/chat/completions` 和 `/v1/responses`。模型列表按正常 Codex 账号的 `allowed_models` 配置展示；若账号设置了模型白名单，使用 GPT-6 时需加入 `gpt-6-astra`。实际调用仍需上游账号具备对应模型权限。
+
 <br>
 </details>
 </details>
@@ -261,8 +263,9 @@ curl http://localhost:8000/v1/images/edits \
 
 | 字段          | 说明                                            |
 |:------------|:----------------------------------------------|
-| `model`     | 图片模型。支持 `gpt-image-2`（默认，映射上游 `gpt-5.6-sol`，与 web 端一致）、`codex-gpt-image-2`、`auto`，也可直接传上游生图 slug（`gpt-5.6-sol` / `gpt-5-5-instant` / `gpt-5-6` 等，以 `/v1/models` 返回为准） |
+| `model`     | 图片模型。支持 `gpt-image-2`（默认，映射上游 `gpt-5-6-thinking`，与 web 端一致）、`codex-gpt-image-2`、`auto`，也可直接传上游生图 slug（`gpt-5-6-thinking` / `gpt-5.6-sol` / `gpt-5-5-instant` 等，以 `/v1/models` 返回为准） |
 | `thinking_effort` / `reasoning_effort` | 可选，思考强度档位。默认高思考（`thinking_effort=extended`，web 端默认档）；`none` 关闭、`standard` 标准模式、`xhigh`/`极高`/`max` 极高思考（`thinking_effort=max`，web 端抓包确认） |
+| `conversation_id` | 可选，上游会话 ID。传入后在同一条 chatgpt 会话内续发生图（模型可见历史与之前生成的图片），响应 `_conversation_id` 返回会话 ID 供下次回传；会话忙时返回 409 `conversation_busy`，稍后重试即可 |
 | `prompt`    | 图片编辑提示词                                       |
 | `n`         | 生成数量，当前后端限制为 `1-4`                            |
 | `output_format` | 输出图片编码格式，支持 `png`、`jpeg`、`webp`，默认 `png`  |

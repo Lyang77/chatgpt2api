@@ -54,6 +54,48 @@ class CodexTextInputTests(unittest.TestCase):
         self.assertEqual(input_items[0]["content"], [{"type": "output_text", "text": "prior answer"}])
         self.assertEqual(input_items[1]["content"], [{"type": "input_text", "text": "next question"}])
 
+    def test_converts_chat_tool_call_and_result_to_codex_response_items(self) -> None:
+        instructions, input_items = codex_messages([
+            {"role": "system", "content": "use the supplied function"},
+            {"role": "user", "content": "query task 42"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_42",
+                    "type": "function",
+                    "function": {
+                        "name": "query_image_task",
+                        "arguments": '{"task_id":"42"}',
+                    },
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_42",
+                "content": {"status": "completed"},
+            },
+        ])
+
+        self.assertEqual(instructions, "use the supplied function")
+        self.assertEqual(input_items, [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "query task 42"}],
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_42",
+                "name": "query_image_task",
+                "arguments": '{"task_id":"42"}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_42",
+                "output": '{"status":"completed"}',
+            },
+        ])
+
     def test_rejects_file_id_images(self) -> None:
         with self.assertRaises(HTTPException) as raised:
             codex_messages([
@@ -113,6 +155,31 @@ class CodexTextTransportTests(unittest.TestCase):
         ):
             return list(codex_text.stream_codex_text_deltas(self._request()))
 
+    def _collect_tool_events(self, events: list[dict]) -> list[dict]:
+        backend = mock.Mock()
+        backend.iter_codex_text_response_events.return_value = iter(events)
+        request = self._request()
+        request.tools = [{
+            "type": "function",
+            "name": "query_image_task",
+            "parameters": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+        }]
+        with (
+            mock.patch.object(codex_text, "OpenAIBackendAPI", return_value=backend),
+            mock.patch.object(codex_text.account_service, "get_text_access_token", return_value="token-a"),
+            mock.patch.object(codex_text.account_service, "get_account", return_value={"email": "a@example.test"}),
+            mock.patch.object(codex_text.account_service, "mark_text_used") as mark_used,
+        ):
+            result = list(codex_text.stream_codex_tool_events(request))
+
+        self.assertEqual(request.account_email, "a@example.test")
+        mark_used.assert_called_once_with("token-a")
+        return result
+
     def test_backend_posts_codex_text_payload_without_image_tools(self) -> None:
         backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
         backend.access_token = "secret-token"
@@ -150,6 +217,169 @@ class CodexTextTransportTests(unittest.TestCase):
         serialized_log = json.dumps([call.args for call in log_info.call_args_list], default=str)
         self.assertNotIn("secret-token", serialized_log)
         self.assertNotIn("base64,AAAA", serialized_log)
+
+    def test_backend_posts_function_tools_and_tool_choice(self) -> None:
+        backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        backend.access_token = "secret-token"
+        backend.base_url = "https://chatgpt.com"
+        backend._ensure_codex_source_account = mock.Mock()
+        backend._codex_responses_headers = mock.Mock(return_value={"Authorization": "Bearer secret-token"})
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        tools = [{
+            "type": "function",
+            "name": "query_image_task",
+            "description": "Query an image task",
+            "parameters": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+        }]
+
+        with mock.patch(
+            "services.openai_backend_api.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            list(backend.iter_codex_text_response_events(
+                instructions="use the function",
+                input_items=self._request().input_items,
+                model="gpt-5.6-sol",
+                tools=tools,
+                tool_choice={"type": "function", "name": "query_image_task"},
+                parallel_tool_calls=False,
+            ))
+
+        outgoing = urlopen.call_args.args[0]
+        payload = json.loads(outgoing.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "gpt-5.6-sol")
+        self.assertEqual(payload["tools"], tools)
+        self.assertEqual(
+            payload["tool_choice"],
+            {"type": "function", "name": "query_image_task"},
+        )
+        self.assertEqual(payload["include"], ["reasoning.encrypted_content"])
+        self.assertFalse(payload["parallel_tool_calls"])
+
+    def test_normalizes_codex_function_call_stream_without_duplicate_arguments(self) -> None:
+        events = self._collect_tool_events([
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_42",
+                    "type": "function_call",
+                    "call_id": "call_42",
+                    "name": "query_image_task",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_42",
+                "output_index": 0,
+                "delta": '{"task_id":',
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_42",
+                "output_index": 0,
+                "delta": '"42"}',
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_42",
+                "output_index": 0,
+                "arguments": '{"task_id":"42"}',
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "id": "fc_42",
+                    "type": "function_call",
+                    "call_id": "call_42",
+                    "name": "query_image_task",
+                    "arguments": '{"task_id":"42"}',
+                },
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [{
+                        "id": "fc_42",
+                        "type": "function_call",
+                        "call_id": "call_42",
+                        "name": "query_image_task",
+                        "arguments": '{"task_id":"42"}',
+                    }],
+                },
+            },
+        ])
+
+        self.assertEqual([event["type"] for event in events], [
+            "tool_call_start",
+            "tool_call_arguments_delta",
+            "tool_call_arguments_delta",
+            "tool_call_done",
+            "completed",
+        ])
+        self.assertEqual(events[0]["call_id"], "call_42")
+        self.assertEqual(events[0]["name"], "query_image_task")
+        self.assertEqual(
+            "".join(event["delta"] for event in events if event["type"] == "tool_call_arguments_delta"),
+            '{"task_id":"42"}',
+        )
+        self.assertEqual(events[-2]["arguments"], '{"task_id":"42"}')
+
+    def test_preserves_encrypted_reasoning_for_responses_tool_replay(self) -> None:
+        reasoning_item = {
+            "id": "rs_42",
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "encrypted-state",
+        }
+        events = self._collect_tool_events([
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": reasoning_item,
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": reasoning_item,
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        reasoning_item,
+                        {
+                            "id": "fc_42",
+                            "type": "function_call",
+                            "call_id": "call_42",
+                            "name": "query_image_task",
+                            "arguments": '{"task_id":"42"}',
+                        },
+                    ],
+                },
+            },
+        ])
+
+        self.assertEqual([event["type"] for event in events], [
+            "reasoning_start",
+            "reasoning_done",
+            "tool_call_start",
+            "tool_call_arguments_delta",
+            "tool_call_done",
+            "completed",
+        ])
+        self.assertEqual(events[1]["item"], reasoning_item)
+        self.assertEqual(events[4]["arguments"], '{"task_id":"42"}')
 
     def test_codex_text_sse_yields_first_event_before_eof(self) -> None:
         class IncrementalRaw:
