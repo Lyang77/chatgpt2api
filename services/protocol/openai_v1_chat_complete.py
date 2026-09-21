@@ -11,6 +11,7 @@ from services.protocol.codex_text import (
     CodexTextRequest,
     codex_messages,
     codex_tool_config,
+    codex_service_tier,
     stream_codex_text_deltas,
     stream_codex_tool_events,
 )
@@ -194,6 +195,7 @@ def codex_chat_request(body: dict[str, Any]) -> tuple[list[dict[str, Any]], Code
         instructions=instructions,
         input_items=input_items,
         reasoning_effort=thinking_effort_from_body(body) or CODEX_TEXT_DEFAULT_REASONING_EFFORT,
+        service_tier=codex_service_tier(body),
         tools=tools,
         tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,

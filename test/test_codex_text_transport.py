@@ -128,6 +128,52 @@ class CodexTextInputTests(unittest.TestCase):
 
 
 class CodexTextTransportTests(unittest.TestCase):
+    def test_service_tier_reaches_upstream_payload(self) -> None:
+        from services.protocol.openai_v1_chat_complete import codex_chat_request
+        from services.protocol.openai_v1_response import codex_response_request
+
+        backend = OpenAIBackendAPI.__new__(OpenAIBackendAPI)
+        backend.access_token = "test-token"
+        backend.base_url = "https://chatgpt.com"
+        backend._ensure_codex_source_account = mock.Mock()
+        backend._codex_responses_headers = mock.Mock(return_value={})
+        backend.close = mock.Mock()
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        backend._iter_codex_text_response_events = mock.Mock(
+            side_effect=lambda *_: iter([
+                {"type": "response.output_text.delta", "delta": "OK"},
+                {"type": "response.completed", "response": {"status": "completed"}},
+            ])
+        )
+        for builder, content in (
+            (codex_chat_request, {"messages": [{"role": "user", "content": "hello"}]}),
+            (codex_response_request, {"input": "hello"}),
+        ):
+            for tier, expected in ((None, "priority"), ("fast", "priority"), ("priority", "priority"), ("default", "default"), ("auto", "auto")):
+                with self.subTest(builder=builder.__name__, tier=tier):
+                    body = {"model": "gpt-6-astra", **content}
+                    if tier is not None:
+                        body["service_tier"] = tier
+                    _, request = builder(body)
+                    with (
+                        mock.patch.object(codex_text, "OpenAIBackendAPI", return_value=backend),
+                        mock.patch.object(codex_text.account_service, "get_text_access_token", return_value="test-token"),
+                        mock.patch.object(codex_text.account_service, "get_account", return_value={}),
+                        mock.patch.object(codex_text.account_service, "mark_text_used"),
+                        mock.patch("services.openai_backend_api.urllib.request.urlopen", return_value=response) as urlopen,
+                        mock.patch("services.openai_backend_api.logger.info"),
+                    ):
+                        list(codex_text.stream_codex_text_deltas(request))
+                    payload = json.loads(urlopen.call_args.args[0].data)
+                    self.assertEqual(payload["service_tier"], expected)
+                    self.assertEqual(payload["model"], "gpt-6-astra")
+            for invalid in ("invalid", "", [], 1):
+                with self.subTest(builder=builder.__name__, invalid=invalid):
+                    with self.assertRaises(HTTPException) as raised:
+                        builder({"model": "gpt-6-astra", **content, "service_tier": invalid})
+                    self.assertEqual(raised.exception.status_code, 400)
+
     @staticmethod
     def _request() -> codex_text.CodexTextRequest:
         return codex_text.CodexTextRequest(
@@ -208,6 +254,7 @@ class CodexTextTransportTests(unittest.TestCase):
         self.assertEqual(outgoing.full_url, "https://chatgpt.com/backend-api/codex/responses")
         self.assertEqual(payload["model"], "gpt-5.5")
         self.assertEqual(payload["reasoning"], {"effort": "low"})
+        self.assertEqual(payload["service_tier"], "priority")
         self.assertEqual(payload["instructions"], "system rule")
         self.assertEqual(payload["input"], self._request().input_items)
         self.assertFalse(payload["store"])

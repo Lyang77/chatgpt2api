@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from services.account_service import account_service
 from services.openai_backend_api import OpenAIBackendAPI
-from utils.helper import CODEX_TEXT_DEFAULT_REASONING_EFFORT, CODEX_TEXT_MODEL
+from utils.helper import CODEX_TEXT_DEFAULT_REASONING_EFFORT, CODEX_TEXT_DEFAULT_SERVICE_TIER, CODEX_TEXT_MODEL
 
 
 class CodexTextGenerationError(RuntimeError):
@@ -27,6 +27,16 @@ class CodexTextRequest:
     tool_choice: object | None = None
     parallel_tool_calls: bool | None = None
     account_email: str = ""
+    service_tier: str = CODEX_TEXT_DEFAULT_SERVICE_TIER
+
+
+def codex_service_tier(body: dict[str, Any]) -> str:
+    value = body.get("service_tier")
+    if value is None:
+        return CODEX_TEXT_DEFAULT_SERVICE_TIER
+    if not isinstance(value, str) or value not in {"fast", "priority", "default", "auto"}:
+        raise HTTPException(status_code=400, detail={"error": "service_tier must be fast, priority, default or auto"})
+    return value
 
 
 T = TypeVar("T")
@@ -654,6 +664,7 @@ def _stream_codex_values(
                 "input_items": request.input_items,
                 "model": request.model or CODEX_TEXT_MODEL,
                 "reasoning_effort": request.reasoning_effort,
+                "service_tier": request.service_tier,
             }
             if request.tools:
                 transport_args["tools"] = request.tools

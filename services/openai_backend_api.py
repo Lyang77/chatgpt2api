@@ -25,6 +25,7 @@ from services.proxy_service import proxy_settings
 from services.protocol.error_response import openai_error_payload
 from utils.helper import (
     CODEX_TEXT_DEFAULT_REASONING_EFFORT,
+    CODEX_TEXT_DEFAULT_SERVICE_TIER,
     CODEX_TEXT_MODEL,
     DEFAULT_IMAGE_UPSTREAM_MODEL,
     UPSTREAM_IMAGE_MODELS,
@@ -920,6 +921,7 @@ class OpenAIBackendAPI:
             tools: list[dict[str, Any]] | None = None,
             tool_choice: object | None = None,
             parallel_tool_calls: bool | None = None,
+            service_tier: str = CODEX_TEXT_DEFAULT_SERVICE_TIER,
     ) -> Iterator[Dict[str, Any]]:
         if not self.access_token:
             raise RuntimeError("access_token is required for codex text endpoints")
@@ -928,6 +930,8 @@ class OpenAIBackendAPI:
         payload = {
             "model": model,
             "reasoning": {"effort": reasoning_effort},
+            # Codex currently accepts priority, but rejects the public API fast alias.
+            "service_tier": "priority" if service_tier == "fast" else service_tier,
             "instructions": instructions,
             "store": False,
             "input": input_items,
@@ -966,7 +970,15 @@ class OpenAIBackendAPI:
         })
         try:
             with urllib.request.urlopen(request, timeout=1200) as raw:
-                yield from self._iter_codex_text_response_events(raw, image_count)
+                for event in self._iter_codex_text_response_events(raw, image_count):
+                    if event.get("type") == "response.completed":
+                        response = event.get("response") or {}
+                        logger.info({
+                            "event": "codex_text_service_tier",
+                            "requested_service_tier": payload["service_tier"],
+                            "actual_service_tier": response.get("service_tier"),
+                        })
+                    yield event
         except urllib.error.HTTPError as error:
             body_text = error.read().decode("utf-8", "replace")
             body: Any = body_text

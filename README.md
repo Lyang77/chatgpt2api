@@ -187,6 +187,8 @@ curl http://localhost:8000/v1/models \
 
 Codex 文本接口支持 `gpt-5.5`、`gpt-5.6-terra`、`gpt-5.6-luna`、`gpt-5.6-sol`、`gpt-6-astra`，可用于 `/v1/chat/completions` 和 `/v1/responses`。模型列表按正常 Codex 账号的 `allowed_models` 配置展示；若账号设置了模型白名单，使用 GPT-6 时需加入 `gpt-6-astra`。实际调用仍需上游账号具备对应模型权限。
 
+Codex 文本请求默认以 `service_tier: "priority"` 请求 Fast 模式；显式传入 `"fast"` 也会转换为 Codex 上游接受的 `"priority"`。如需普通模式，传入 `service_tier: "default"`；也支持 `"auto"` 交由上游决定。思考强度仍默认 `low`。Fast 是否生效由上游决定，可能返回 `default`；日志 `codex_text_service_tier` 记录请求模式和实际模式，不能仅凭请求成功认定加速生效。
+
 <br>
 </details>
 </details>
